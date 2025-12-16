@@ -22,6 +22,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val scannedDevices: StateFlow<List<BleDevice>> = bleManager.scannedDevices
     val isScanning: StateFlow<Boolean> = bleManager.isScanning
     val connectionState: StateFlow<String> = bleManager.connectionState
+    val scanFilter: StateFlow<String> = bleManager.scanFilter
 
     // Media metadata state
     private val _currentMedia = MutableStateFlow(MediaMetadata())
@@ -90,6 +91,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun hasBlePermissions(): Boolean = bleManager.hasBlePermissions()
     fun isBluetoothEnabled(): Boolean = bleManager.isBluetoothEnabled()
+
+    // Scan filter methods
+    fun setScanFilter(filter: String) {
+        bleManager.setScanFilter(filter)
+    }
+
+    fun clearScanFilter() {
+        bleManager.clearScanFilter()
+    }
 
     fun setNotificationAccess(hasAccess: Boolean) {
         _hasNotificationAccess.value = hasAccess

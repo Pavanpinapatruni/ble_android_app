@@ -37,6 +37,10 @@ fun MainScreen(
     val currentMedia by viewModel.currentMedia.collectAsState()
     val currentCall by viewModel.currentCall.collectAsState()
     val hasNotificationAccess by viewModel.hasNotificationAccess.collectAsState()
+    val scanFilter by viewModel.scanFilter.collectAsState()
+    
+    // Local state for filter input
+    var filterText by remember { mutableStateOf("") }
 
     // Permission launcher
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -194,6 +198,50 @@ fun MainScreen(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Enable Notification Access")
                     }
+                }
+                
+                // Scan Filter Input
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = filterText,
+                    onValueChange = { newValue ->
+                        filterText = newValue
+                        viewModel.setScanFilter(newValue)
+                    },
+                    label = { Text("Filter by device name") },
+                    placeholder = { Text("Enter device name...") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Filter"
+                        )
+                    },
+                    trailingIcon = {
+                        if (filterText.isNotEmpty()) {
+                            IconButton(
+                                onClick = {
+                                    filterText = ""
+                                    viewModel.clearScanFilter()
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Clear filter"
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                
+                if (scanFilter.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Filtering devices containing: \"$scanFilter\"",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
         }

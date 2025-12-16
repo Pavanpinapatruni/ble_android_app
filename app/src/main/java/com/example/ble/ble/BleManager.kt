@@ -52,6 +52,10 @@ class BleManager(private val context: Context) {
     
     private val _connectionState = MutableStateFlow<String>("Disconnected")
     val connectionState: StateFlow<String> = _connectionState.asStateFlow()
+    
+    // Scan filter state
+    private val _scanFilter = MutableStateFlow<String>("")
+    val scanFilter: StateFlow<String> = _scanFilter.asStateFlow()
 
     private val foundDevices = mutableMapOf<String, BleDevice>()
 
@@ -62,6 +66,13 @@ class BleManager(private val context: Context) {
             
             val device = result.device
             val rssi = result.rssi
+            val deviceName = device.name ?: "Unknown Device"
+            
+            // Apply name filter if set
+            val currentFilter = _scanFilter.value
+            if (currentFilter.isNotEmpty() && !deviceName.lowercase().contains(currentFilter.lowercase())) {
+                return // Skip this device as it doesn't match the filter
+            }
             
             val bleDevice = BleDevice.fromBluetoothDevice(
                 device = device,
@@ -71,7 +82,17 @@ class BleManager(private val context: Context) {
             )
             
             foundDevices[device.address] = bleDevice
-            _scannedDevices.value = foundDevices.values.toList().sortedByDescending { it.rssi }
+            
+            // Apply filter to the entire list before updating UI
+            val filteredDevices = if (currentFilter.isNotEmpty()) {
+                foundDevices.values.filter { 
+                    it.name.lowercase().contains(currentFilter.lowercase()) 
+                }
+            } else {
+                foundDevices.values.toList()
+            }
+            
+            _scannedDevices.value = filteredDevices.sortedByDescending { it.rssi }
             
             Log.d(TAG, "Found device: ${bleDevice.name} (${bleDevice.address}) RSSI: ${bleDevice.rssi}")
         }
@@ -346,6 +367,33 @@ class BleManager(private val context: Context) {
     }
 
     fun isBluetoothEnabled(): Boolean = bluetoothAdapter.isEnabled
+
+    // Scan filter management
+    fun setScanFilter(filter: String) {
+        _scanFilter.value = filter
+        // Apply filter to already discovered devices
+        applyFilterToFoundDevices()
+        Log.d(TAG, "Scan filter set to: '$filter'")
+    }
+
+    fun clearScanFilter() {
+        _scanFilter.value = ""
+        // Show all discovered devices
+        applyFilterToFoundDevices()
+        Log.d(TAG, "Scan filter cleared")
+    }
+
+    private fun applyFilterToFoundDevices() {
+        val currentFilter = _scanFilter.value
+        val filteredDevices = if (currentFilter.isNotEmpty()) {
+            foundDevices.values.filter { 
+                it.name.lowercase().contains(currentFilter.lowercase()) 
+            }
+        } else {
+            foundDevices.values.toList()
+        }
+        _scannedDevices.value = filteredDevices.sortedByDescending { it.rssi }
+    }
 
     fun cleanup() {
         stopScan()
