@@ -14,7 +14,7 @@ import com.example.ble.ble.BleManager
 
 private const val TAG = "MediaListenerService"
 
-class MediaListenerService : NotificationListenerService() {
+class MediaListenerService : NotificationListenerService(), MediaSessionManager.OnActiveSessionsChangedListener {
     
     private var mediaSessionManager: MediaSessionManager? = null
     private val activeControllers = mutableMapOf<String, MediaController>()
@@ -53,6 +53,15 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        
+        // Unregister the session change listener
+        try {
+            mediaSessionManager?.removeOnActiveSessionsChangedListener(this)
+            Log.d(TAG, "Unregistered active session change listener")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error unregistering session change listener", e)
+        }
+        
         cleanupMediaControllers()
         bleManager?.cleanup()
         instance = null
@@ -62,29 +71,110 @@ class MediaListenerService : NotificationListenerService() {
     private fun setupMediaSessionManager() {
         try {
             mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
+            
+            // Register for active session changes to detect when apps start/stop
+            mediaSessionManager?.addOnActiveSessionsChangedListener(
+                this, // this service implements OnActiveSessionsChangedListener
+                ComponentName(this, MediaListenerService::class.java)
+            )
+            Log.d(TAG, "Registered for active session changes")
+            
             updateActiveMediaControllers()
+            
+            // Start periodic refresh to catch any missed sessions
+            startPeriodicRefresh()
         } catch (e: Exception) {
             Log.e(TAG, "Error setting up MediaSessionManager", e)
         }
     }
     
+    private fun startPeriodicRefresh() {
+        // Use a handler to periodically refresh active sessions
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (mediaSessionManager != null) {
+                Log.d(TAG, "🔄 Periodic refresh of active media sessions")
+                updateActiveMediaControllers()
+                startPeriodicRefresh() // Schedule next refresh
+            }
+        }, 10000) // Refresh every 10 seconds
+    }
+    
+    // Implementation of OnActiveSessionsChangedListener
+    override fun onActiveSessionsChanged(controllers: List<MediaController>?) {
+        Log.d(TAG, "🔄 Active sessions changed! Found ${controllers?.size ?: 0} controllers")
+        
+        // Clean up old controllers that are no longer active
+        val currentPackages = controllers?.map { it.packageName }?.toSet() ?: emptySet()
+        val oldPackages = activeControllers.keys.toSet()
+        
+        // Remove controllers for apps that are no longer active
+        oldPackages.subtract(currentPackages).forEach { packageName ->
+            Log.d(TAG, "📱 Removing controller for closed app: $packageName")
+            controllerCallbacks[packageName]?.let { callback ->
+                activeControllers[packageName]?.unregisterCallback(callback)
+            }
+            activeControllers.remove(packageName)
+            controllerCallbacks.remove(packageName)
+        }
+        
+        // Add controllers for new active apps
+        controllers?.forEach { controller ->
+            val packageName = controller.packageName
+            if (isMediaApp(packageName) && !activeControllers.containsKey(packageName)) {
+                Log.d(TAG, "📱 Adding controller for new app: $packageName")
+                activeControllers[packageName] = controller
+                setupControllerCallback(controller)
+                
+                // Get initial metadata if available
+                controller.metadata?.let { metadata ->
+                    handleMediaSessionMetadata(metadata, controller.playbackState, packageName)
+                }
+            }
+        }
+    }
+    
     private fun updateActiveMediaControllers() {
         try {
-            mediaSessionManager?.getActiveSessions(
+            val activeSessions = mediaSessionManager?.getActiveSessions(
                 ComponentName(this, MediaListenerService::class.java)
-            )?.forEach { controller ->
+            ) ?: emptyList()
+            
+            Log.d(TAG, "🔍 Updating active media controllers. Found ${activeSessions.size} active sessions")
+            
+            // Get current active packages
+            val currentPackages = activeSessions.map { it.packageName }.toSet()
+            val knownPackages = activeControllers.keys.toSet()
+            
+            // Clean up controllers for packages that are no longer active
+            knownPackages.subtract(currentPackages).forEach { packageName ->
+                Log.d(TAG, "🗑️ Removing controller for inactive app: $packageName")
+                controllerCallbacks[packageName]?.let { callback ->
+                    activeControllers[packageName]?.unregisterCallback(callback)
+                }
+                activeControllers.remove(packageName)
+                controllerCallbacks.remove(packageName)
+            }
+            
+            // Add/update controllers for active sessions
+            activeSessions.forEach { controller ->
                 val packageName = controller.packageName
-                if (isMediaApp(packageName) && !activeControllers.containsKey(packageName)) {
-                    activeControllers[packageName] = controller
-                    setupControllerCallback(controller)
-                    Log.d(TAG, "Added media controller for: $packageName")
-                    
-                    // Get initial metadata if available
-                    controller.metadata?.let { metadata ->
-                        handleMediaSessionMetadata(metadata, controller.playbackState, packageName)
+                if (isMediaApp(packageName)) {
+                    if (!activeControllers.containsKey(packageName)) {
+                        Log.d(TAG, "➕ Adding media controller for: $packageName")
+                        activeControllers[packageName] = controller
+                        setupControllerCallback(controller)
+                        
+                        // Get initial metadata if available
+                        controller.metadata?.let { metadata ->
+                            handleMediaSessionMetadata(metadata, controller.playbackState, packageName)
+                        }
+                    } else {
+                        // Update existing controller reference in case it changed
+                        activeControllers[packageName] = controller
                     }
                 }
             }
+            
         } catch (e: SecurityException) {
             Log.w(TAG, "Cannot access media sessions - notification listener permission needed")
         } catch (e: Exception) {
