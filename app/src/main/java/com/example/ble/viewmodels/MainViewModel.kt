@@ -1,6 +1,7 @@
 package com.example.ble.viewmodels
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ble.ble.BleManager
@@ -37,6 +38,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val hasNotificationAccess: StateFlow<Boolean> = _hasNotificationAccess.asStateFlow()
 
     init {
+        MediaListenerService.setBleManager(bleManager)
         setupMediaListener()
         setupPhoneStateListener()
     }
@@ -54,12 +56,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         PhoneStateReceiver.setPhoneStateListener { callInfo ->
             viewModelScope.launch {
                 _currentCall.value = callInfo
-                val callStateString = when (callInfo.state) {
-                    com.example.ble.models.PhoneCallState.IDLE -> "IDLE"
-                    com.example.ble.models.PhoneCallState.RINGING -> "RINGING"
-                    com.example.ble.models.PhoneCallState.OFFHOOK -> "OFFHOOK"
-                }
-                bleManager.updateCallState(callStateString)
+                // Call state removed from MCS - only for UI display now
+                Log.d("MainViewModel", "Call state changed: ${callInfo.state}")
             }
         }
     }

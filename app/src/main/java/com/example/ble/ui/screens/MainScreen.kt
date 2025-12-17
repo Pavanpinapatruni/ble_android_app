@@ -96,16 +96,87 @@ fun MainScreen(
                 // Media info
                 if (currentMedia.title != null) {
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Playing: ${currentMedia.title}",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    if (currentMedia.artist != null) {
-                        Text(
-                            text = "Artist: ${currentMedia.artist}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (currentMedia.isPlaying) 
+                                MaterialTheme.colorScheme.primaryContainer 
+                            else MaterialTheme.colorScheme.surfaceVariant
                         )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (currentMedia.isPlaying) Icons.Default.PlayArrow else Icons.Default.PlayArrow,
+                                    contentDescription = if (currentMedia.isPlaying) "Playing" else "Paused",
+                                    tint = if (currentMedia.isPlaying) Color.Green else Color.Gray
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = currentMedia.title ?: "Unknown Title",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            
+                            if (currentMedia.artist != null) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Artist: ${currentMedia.artist}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            
+                            if (currentMedia.album != null) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Album: ${currentMedia.album}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            
+                            if (currentMedia.packageName != null) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Source: ${getAppDisplayName(currentMedia.packageName!!)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            
+                            // Progress information
+                            if (currentMedia.duration > 0 && currentMedia.position > 0) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = formatTime(currentMedia.position),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    LinearProgressIndicator(
+                                        progress = { (currentMedia.position.toFloat() / currentMedia.duration.toFloat()).coerceIn(0f, 1f) },
+                                        modifier = Modifier.weight(1f),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = formatTime(currentMedia.duration),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
                 
@@ -366,4 +437,36 @@ fun DeviceCard(
             }
         }
     }
+}
+
+/**
+ * Helper function to get a user-friendly display name for music apps
+ */
+private fun getAppDisplayName(packageName: String): String {
+    return when {
+        packageName.contains("spotify", ignoreCase = true) -> "Spotify"
+        packageName.contains("youtube", ignoreCase = true) -> "YouTube Music"
+        packageName.contains("music", ignoreCase = true) -> when {
+            packageName.contains("google") -> "YouTube Music"
+            packageName.contains("apple") -> "Apple Music"
+            else -> "Music"
+        }
+        packageName.contains("soundcloud", ignoreCase = true) -> "SoundCloud"
+        packageName.contains("pandora", ignoreCase = true) -> "Pandora"
+        packageName.contains("deezer", ignoreCase = true) -> "Deezer"
+        else -> packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() }
+    }
+}
+
+/**
+ * Helper function to format time from milliseconds to MM:SS format
+ */
+private fun formatTime(milliseconds: Long): String {
+    if (milliseconds <= 0) return "0:00"
+    
+    val totalSeconds = milliseconds / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    
+    return "${minutes}:${seconds.toString().padStart(2, '0')}"
 }
