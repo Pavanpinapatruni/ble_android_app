@@ -296,11 +296,11 @@ class BleManager(private val context: Context) {
                 expectedChars.forEach { (uuid, name) ->
                     val char = service.getCharacteristic(uuid)
                     if (char != null) {
-                        // Initialize characteristics with default values
+                        // Initialize characteristics with proper default values
                         when (uuid) {
-                            MP_NAME_UUID -> char.value = "MediaPlayer".toByteArray(Charsets.UTF_8)
+                            MP_NAME_UUID -> char.value = "MediaPlayer".toByteArray(Charsets.UTF_8) // String
                             TITLE_UUID -> char.value = "No Media".toByteArray(Charsets.UTF_8)
-                            STATE_UUID -> char.value = "Stopped".toByteArray(Charsets.UTF_8)
+                            STATE_UUID -> char.value = byteArrayOf(0) // Numeric: 0=Inactive
                             TRACK_CHANGED_UUID -> char.value = byteArrayOf(0x00)
                             DURATION_UUID -> char.value = ByteArray(4) { 0 }
                             POSITION_UUID -> char.value = ByteArray(4) { 0 }
@@ -641,7 +641,7 @@ class BleManager(private val context: Context) {
 
         // Create characteristics for Media Control Service (MCS) Standard with default values
         val mpNameChar = createNotifyCharacteristic(MP_NAME_UUID)
-        mpNameChar.value = "MediaPlayer".toByteArray(Charsets.UTF_8)
+        mpNameChar.value = "MediaPlayer".toByteArray(Charsets.UTF_8) // String format
         service.addCharacteristic(mpNameChar)
 
         val trackChangedChar = createNotifyCharacteristic(TRACK_CHANGED_UUID)
@@ -742,7 +742,10 @@ class BleManager(private val context: Context) {
         }
         
         // MCS Standard Characteristics
-        metadata.title?.let { notifyCharacteristic(TITLE_UUID, it) }
+        metadata.title?.let { 
+            Log.d(TAG, "🎵 Sending TITLE: '$it'")
+            notifyCharacteristic(TITLE_UUID, it) 
+        }
         
         // Send track changed notification
         notifyCharacteristicBytes(TRACK_CHANGED_UUID, byteArrayOf(trackChangeCounter.toByte()))
@@ -758,7 +761,7 @@ class BleManager(private val context: Context) {
             notifyCharacteristicBytes(POSITION_UUID, positionBytes)
         }
         
-        // Use MP_NAME for source identification
+        // Use MP_NAME for source identification (send as string)
         metadata.packageName?.let { packageName ->
             val appName = when {
                 packageName.contains("spotify", ignoreCase = true) -> "Spotify"
@@ -773,16 +776,23 @@ class BleManager(private val context: Context) {
                 packageName.contains("deezer", ignoreCase = true) -> "Deezer"
                 else -> packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() }
             }
+            Log.d(TAG, "🎵 Sending MP_NAME (String): '$appName' for $packageName")
             notifyCharacteristic(MP_NAME_UUID, appName)
         }
         
-        // MCS Media State (using standard values)
-        val mcsState = when {
-            metadata.isPlaying -> "Playing"
-            metadata.title != null -> "Paused" 
-            else -> "Stopped"
+        // MCS Media State (using proper byte values)
+        val mcsStateCode = when {
+            metadata.isPlaying -> 1 // Playing
+            metadata.title != null -> 2 // Paused 
+            else -> 0 // Inactive
         }
-        notifyCharacteristic(STATE_UUID, mcsState)
+        val mcsStateName = when (mcsStateCode) {
+            1 -> "Playing"
+            2 -> "Paused"
+            else -> "Inactive"
+        }
+        Log.d(TAG, "🎵 Sending STATE: $mcsStateName (code: $mcsStateCode, byte: ${mcsStateCode.toByte()})")
+        notifyCharacteristicBytes(STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
         
         // Clear recently connected devices after sending initial notifications
         if (recentlyConnectedDevices.isNotEmpty()) {
@@ -790,7 +800,7 @@ class BleManager(private val context: Context) {
             recentlyConnectedDevices.clear()
         }
         
-        Log.d(TAG, "Updated MCS metadata: ${metadata.title} from ${metadata.packageName} - $mcsState")
+        Log.d(TAG, "Updated MCS metadata: ${metadata.title} from ${metadata.packageName} - $mcsStateName")
     }
 
     private fun notifyCharacteristic(uuid: UUID, value: String) {
@@ -801,8 +811,12 @@ class BleManager(private val context: Context) {
         val lastValue = lastSentValues[uuid]
         val hasChanged = lastValue != value
         
-        if (!hasChanged && recentlyConnectedDevices.isEmpty()) {
-            Log.d(TAG, "📋 No change for $uuid: '$value' (skipping notification)")
+        // Always send to newly connected devices, even if value hasn't changed
+        val shouldSendToNewDevices = recentlyConnectedDevices.isNotEmpty()
+        val shouldSendToAllDevices = hasChanged
+        
+        if (!shouldSendToAllDevices && !shouldSendToNewDevices) {
+            Log.d(TAG, "📋 No change for $uuid: '$value' and no new devices (skipping notification)")
             return
         }
 
@@ -810,7 +824,7 @@ class BleManager(private val context: Context) {
         characteristic.value = value.toByteArray(Charsets.UTF_8)
 
         // Send notifications to devices
-        if (hasChanged) {
+        if (shouldSendToAllDevices) {
             // Send to all connected devices on value change
             Log.d(TAG, "🔄 Value changed for $uuid: '$lastValue' → '$value'")
             connectedDevices.forEach { device ->
@@ -823,7 +837,7 @@ class BleManager(private val context: Context) {
             }
             // Update last sent value
             lastSentValues[uuid] = value
-        } else if (recentlyConnectedDevices.isNotEmpty()) {
+        } else if (shouldSendToNewDevices) {
             // Send only to recently connected devices (same value)
             Log.d(TAG, "🆕 Sending current value for $uuid to newly connected devices: '$value'")
             recentlyConnectedDevices.forEach { device ->
@@ -834,6 +848,8 @@ class BleManager(private val context: Context) {
                 )
                 Log.d(TAG, "📡 Notify $uuid to ${device.address} (new device) → $ok")
             }
+            // Update last sent value for new devices too
+            lastSentValues[uuid] = value
         }
     }
 
@@ -841,13 +857,32 @@ class BleManager(private val context: Context) {
         val service = gattServer?.getService(MEDIA_SERVICE_UUID) ?: return
         val characteristic = service.getCharacteristic(uuid) ?: return
 
+        // Debug logging for byte values
+        val charName = when (uuid) {
+            STATE_UUID -> "STATE"
+            TRACK_CHANGED_UUID -> "TRACK_CHANGED"
+            DURATION_UUID -> "DURATION"
+            POSITION_UUID -> "POSITION"
+            MP_NAME_UUID -> "MP_NAME"
+            else -> uuid.toString()
+        }
+        
+        Log.d(TAG, "🔢 notifyCharacteristicBytes for $charName:")
+        Log.d(TAG, "   Raw bytes: ${value.contentToString()}")
+        Log.d(TAG, "   Decimal values: ${value.joinToString(", ") { it.toUByte().toString() }}")
+        Log.d(TAG, "   Hex values: ${value.joinToString(", ") { "0x%02X".format(it) }}")
+
         // Check if value actually changed (compare byte arrays)
         val lastValue = lastSentValues[uuid]
         val currentValueString = value.contentToString()
         val hasChanged = lastValue != currentValueString
         
-        if (!hasChanged && recentlyConnectedDevices.isEmpty()) {
-            Log.d(TAG, "📋 No change for $uuid: ${value.contentToString()} (skipping notification)")
+        // Always send to newly connected devices, even if value hasn't changed
+        val shouldSendToNewDevices = recentlyConnectedDevices.isNotEmpty()
+        val shouldSendToAllDevices = hasChanged
+        
+        if (!shouldSendToAllDevices && !shouldSendToNewDevices) {
+            Log.d(TAG, "📋 No change for $uuid: ${value.contentToString()} and no new devices (skipping notification)")
             return
         }
 
@@ -855,7 +890,7 @@ class BleManager(private val context: Context) {
         characteristic.value = value
 
         // Send notifications to devices
-        if (hasChanged) {
+        if (shouldSendToAllDevices) {
             // Send to all connected devices on value change
             Log.d(TAG, "🔄 Value changed for $uuid: '$lastValue' → '${value.contentToString()}'")
             connectedDevices.forEach { device ->
@@ -868,7 +903,7 @@ class BleManager(private val context: Context) {
             }
             // Update last sent value
             lastSentValues[uuid] = currentValueString
-        } else if (recentlyConnectedDevices.isNotEmpty()) {
+        } else if (shouldSendToNewDevices) {
             // Send only to recently connected devices (same value)
             Log.d(TAG, "🆕 Sending current value for $uuid to newly connected devices: ${value.contentToString()}")
             recentlyConnectedDevices.forEach { device ->
@@ -879,6 +914,8 @@ class BleManager(private val context: Context) {
                 )
                 Log.d(TAG, "📡 Notify $uuid to ${device.address} (new device) → $ok")
             }
+            // Update last sent value for new devices too
+            lastSentValues[uuid] = currentValueString
         }
     }
 
@@ -988,17 +1025,64 @@ class BleManager(private val context: Context) {
     private fun sendInitialNotifications(device: BluetoothDevice) {
         Log.d(TAG, "🚀 SENDING INITIAL NOTIFICATIONS to ${device.address}")
         
-        // Use current metadata if available, otherwise send default values
+        // Ensure this device is marked as recently connected
+        if (!recentlyConnectedDevices.contains(device)) {
+            recentlyConnectedDevices.add(device)
+            Log.d(TAG, "📝 Added ${device.address} to recently connected devices")
+        }
+        
+        // Use current metadata if available, otherwise send default values  
         currentMediaMetadata?.let { metadata ->
             Log.d(TAG, "📱 Using current media metadata for initial notifications")
-            updateMediaMetadata(metadata)
+            
+            // Force send all current values to new device
+            metadata.packageName?.let { packageName ->
+                val appName = when {
+                    packageName.contains("spotify", ignoreCase = true) -> "Spotify"
+                    packageName.contains("youtube", ignoreCase = true) -> "YouTube Music"
+                    packageName.contains("music", ignoreCase = true) -> when {
+                        packageName.contains("google") -> "YouTube Music"
+                        packageName.contains("apple") -> "Apple Music"
+                        else -> "Music"
+                    }
+                    packageName.contains("soundcloud", ignoreCase = true) -> "SoundCloud"
+                    packageName.contains("pandora", ignoreCase = true) -> "Pandora"
+                    packageName.contains("deezer", ignoreCase = true) -> "Deezer"
+                    else -> packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() }
+                }
+                Log.d(TAG, "🆕 Force sending MP_NAME: '$appName' to new device")
+                notifyCharacteristic(MP_NAME_UUID, appName)
+            }
+            
+            metadata.title?.let { 
+                Log.d(TAG, "🆕 Force sending TITLE: '$it' to new device")
+                notifyCharacteristic(TITLE_UUID, it)
+            }
+            
+            val mcsStateCode = when {
+                metadata.isPlaying -> 1 
+                metadata.title != null -> 2 
+                else -> 0 
+            }
+            val mcsStateName = when (mcsStateCode) {
+                1 -> "Playing"
+                2 -> "Paused"
+                else -> "Inactive"
+            }
+            Log.d(TAG, "🆕 Force sending STATE: $mcsStateName to new device")
+            notifyCharacteristicBytes(STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
+            
         } ?: run {
             Log.d(TAG, "📱 Sending default initial values")
             // Send default values for initial connection
-            notifyCharacteristic(MP_NAME_UUID, "MediaPlayer")
+            notifyCharacteristic(MP_NAME_UUID, "MediaPlayer") 
             notifyCharacteristic(TITLE_UUID, "No Media")
-            notifyCharacteristic(STATE_UUID, "Stopped")
+            notifyCharacteristicBytes(STATE_UUID, byteArrayOf(0)) 
         }
+        
+        // Remove this specific device from recently connected after notifications
+        recentlyConnectedDevices.remove(device)
+        Log.d(TAG, "🧹 Removed ${device.address} from recently connected devices after initial notifications")
     }
     
     // Add active monitoring for TI chip behavior
