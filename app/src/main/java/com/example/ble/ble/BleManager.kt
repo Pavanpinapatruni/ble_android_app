@@ -465,21 +465,106 @@ class BleManager(private val context: Context) {
                     MCP_UUID -> {
                         Log.d(TAG, "🎮 MEDIA CONTROL POINT COMMAND RECEIVED!")
                         if (value.isNotEmpty()) {
-                            val command = value[0]
-                            Log.d(TAG, "   Command opcode: 0x${"%02x".format(command)}")
-                            when (command.toInt()) {
+                            // Enhanced debugging: log full byte array
+                            Log.d(TAG, "   Raw bytes: ${value.contentToString()}")
+                            Log.d(TAG, "   Raw bytes (hex): ${value.joinToString(" ") { "%02x".format(it.toInt() and 0xFF) }}")
+                            Log.d(TAG, "   Array size: ${value.size} bytes")
+                            
+                            // Use proper unsigned byte conversion
+                            val rawCommand = value[0].toInt() and 0xFF
+                            Log.d(TAG, "   Raw command opcode: 0x${"%02x".format(rawCommand)}")
+                            
+                            // Map TI chip commands to standard MCS commands if needed
+                            val command = mapTiChipCommand(rawCommand)
+                            Log.d(TAG, "   Mapped command opcode: 0x${"%02x".format(command)}")
+                            
+                            // Log the command type
+                            when (command) {
                                 0x01 -> Log.d(TAG, "   ▶️ PLAY command")
                                 0x02 -> Log.d(TAG, "   ⏸️ PAUSE command") 
                                 0x03 -> Log.d(TAG, "   ⏹️ STOP command")
                                 0x04 -> Log.d(TAG, "   ⏭️ NEXT TRACK command")
                                 0x05 -> Log.d(TAG, "   ⏮️ PREVIOUS TRACK command")
-                                else -> Log.d(TAG, "   ❓ Unknown command: $command")
+                                0x10 -> Log.d(TAG, "   ⏪ FAST REWIND command")
+                                0x11 -> Log.d(TAG, "   ⏩ FAST FORWARD command")
+                                0x30 -> Log.d(TAG, "   🔀 GOTO command")
+                                -1 -> Log.w(TAG, "   🚫 UNMAPPED command: 0x${"%02x".format(rawCommand)}")
+                                else -> {
+                                    Log.w(TAG, "   ❓ Unknown command: 0x${"%02x".format(command)} (decimal: $command)")
+                                    Log.d(TAG, "   💡 Valid MCS commands are:")
+                                    Log.d(TAG, "      0x01 = Play, 0x02 = Pause, 0x03 = Stop")
+                                    Log.d(TAG, "      0x04 = Next Track, 0x05 = Previous Track")
+                                    Log.d(TAG, "      0x10 = Fast Rewind, 0x11 = Fast Forward")
+                                    Log.d(TAG, "      0x30 = Goto")
+                                }
+                            }
+                            
+                            // Only execute valid commands
+                            if (command in listOf(0x01, 0x02, 0x03, 0x04, 0x05, 0x10, 0x11, 0x30) && command != -1) {
+                                try {
+                                    val success = com.example.ble.services.MediaListenerService.executeMediaCommand(command)
+                                    if (success) {
+                                        Log.d(TAG, "✅ Media command executed successfully")
+                                    } else {
+                                        Log.w(TAG, "❌ Failed to execute media command")
+                                        Log.d(TAG, "📊 ${com.example.ble.services.MediaListenerService.getActiveControllersInfo()}")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "❌ Error executing media command", e)
+                                }
+                            } else {
+                                Log.w(TAG, "🚫 Skipping execution of unknown/unmapped command: 0x${"%02x".format(rawCommand)}")
                             }
                         }
                     }
                 }
             } else {
                 Log.d(TAG, "📝 Write request with no response needed")
+            }
+        }
+    }
+    
+    /**
+     * Map TI chip specific commands to standard MCS opcodes
+     * TI chip might be using different encoding than standard MCS
+     */
+    private fun mapTiChipCommand(rawCommand: Int): Int {
+        return when (rawCommand) {
+            // Standard MCS commands (pass through)
+            0x01 -> 0x01 // Play
+            0x02 -> 0x02 // Pause
+            0x03 -> 0x03 // Stop
+            0x04 -> 0x04 // Next Track
+            0x05 -> 0x05 // Previous Track
+            0x10 -> 0x10 // Fast Rewind
+            0x11 -> 0x11 // Fast Forward
+            
+            // TI chip specific mappings
+            0x30 -> {
+                Log.d(TAG, "🔄 TI chip command 0x30 detected - mapping to Previous Track")
+                0x05 // Map to Previous Track (not GOTO)
+            }
+            0x31 -> {
+                Log.d(TAG, "🔄 TI chip command 0x31 detected - mapping to Next Track")
+                0x04 // Map to Next Track
+            }
+            0x32 -> {
+                Log.d(TAG, "🔄 TI chip command 0x32 detected - mapping to Previous Track")
+                0x05 // Map to Previous Track
+            }
+            0x33 -> {
+                Log.d(TAG, "🔄 TI chip command 0x33 detected - mapping to Play")
+                0x01 // Map to Play
+            }
+            0x34 -> {
+                Log.d(TAG, "🔄 TI chip command 0x34 detected - mapping to Pause")
+                0x02 // Map to Pause
+            }
+            
+            // Unknown command
+            else -> {
+                Log.w(TAG, "⚠️ Unknown TI chip command: 0x${"%02x".format(rawCommand)}")
+                -1 // Invalid command marker
             }
         }
     }

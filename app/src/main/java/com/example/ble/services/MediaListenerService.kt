@@ -42,6 +42,14 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         }
         
         fun getCurrentMetadata(): MediaMetadata? = currentMediaMetadata
+        
+        fun executeMediaCommand(command: Int): Boolean {
+            return instance?.executeMediaCommand(command) ?: false
+        }
+        
+        fun getActiveControllersInfo(): String {
+            return instance?.getActiveControllersInfo() ?: "MediaListenerService not active"
+        }
     }
 
     override fun onCreate() {
@@ -343,5 +351,96 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         return mediaApps.any { packageName.contains(it) } ||
                 sbn.notification.extras.containsKey("android.mediaSession") ||
                 sbn.notification.category == "transport"
+    }
+    
+    // Media control methods for BLE commands
+    fun executeMediaCommand(command: Int): Boolean {
+        Log.d(TAG, "🎮 Executing media command: 0x${"%02x".format(command)}")
+        
+        // Find the active media controller (prioritize currently playing)
+        val activeController = activeControllers.values.firstOrNull { controller ->
+            controller.playbackState?.state == PlaybackState.STATE_PLAYING
+        } ?: activeControllers.values.firstOrNull()
+        
+        if (activeController == null) {
+            Log.w(TAG, "❌ No active media controller found for command execution")
+            Log.d(TAG, "📊 Available controllers: ${activeControllers.keys}")
+            return false
+        }
+        
+        try {
+            val transportControls = activeController.transportControls
+            val playbackState = activeController.playbackState
+            Log.d(TAG, "🎵 Using controller for: ${activeController.packageName}")
+            Log.d(TAG, "🎵 Current playback state: ${playbackState?.state}")
+            
+            when (command) {
+                0x01 -> {
+                    Log.d(TAG, "▶️ Executing PLAY command")
+                    transportControls.play()
+                }
+                0x02 -> {
+                    Log.d(TAG, "⏸️ Executing PAUSE command")
+                    transportControls.pause()
+                }
+                0x03 -> {
+                    Log.d(TAG, "⏹️ Executing STOP command")
+                    transportControls.stop()
+                }
+                0x04 -> {
+                    Log.d(TAG, "⏭️ Executing NEXT TRACK command")
+                    transportControls.skipToNext()
+                }
+                0x05 -> {
+                    Log.d(TAG, "⏮️ Executing PREVIOUS TRACK command")
+                    transportControls.skipToPrevious()
+                }
+                0x10 -> {
+                    Log.d(TAG, "⏪ Executing FAST REWIND command")
+                    transportControls.rewind()
+                }
+                0x11 -> {
+                    Log.d(TAG, "⏩ Executing FAST FORWARD command")
+                    transportControls.fastForward()
+                }
+                0x30 -> {
+                    Log.d(TAG, "🔀 GOTO command received (not implemented)")
+                    Log.w(TAG, "GOTO command requires position parameter - not supported yet")
+                    return false
+                }
+                else -> {
+                    Log.w(TAG, "❓ Unsupported command: 0x${"%02x".format(command)}")
+                    return false
+                }
+            }
+            
+            Log.d(TAG, "✅ Media command executed successfully")
+            
+            // Give a small delay for the command to take effect, then check state
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                val newState = activeController.playbackState
+                Log.d(TAG, "🔄 Playback state after command: ${newState?.state}")
+            }, 500)
+            
+            return true
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error executing media command", e)
+            return false
+        }
+    }
+    
+    fun getCurrentActiveController(): MediaController? {
+        return activeControllers.values.firstOrNull { controller ->
+            controller.playbackState?.state == PlaybackState.STATE_PLAYING
+        } ?: activeControllers.values.firstOrNull()
+    }
+    
+    fun getActiveControllersInfo(): String {
+        return if (activeControllers.isEmpty()) {
+            "No active media controllers"
+        } else {
+            "Active controllers: ${activeControllers.keys.joinToString(", ")}"
+        }
     }
 }
