@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.*
 
 private const val TAG = "BleManager"
@@ -49,6 +50,7 @@ class BleManager(private val context: Context) {
     
     // Track last sent values for change detection
     private val lastSentValues = mutableMapOf<UUID, String>()
+    private var lastSentPositionSeconds = -1L  // Track last sent position in seconds
     private val recentlyConnectedDevices = mutableSetOf<BluetoothDevice>()
     
     // Service UUIDs - Media Control Service (MCS) Bluetooth SIG Standard
@@ -816,6 +818,12 @@ class BleManager(private val context: Context) {
     fun updateMediaMetadata(metadata: MediaMetadata) {
         if (!hasBlePermissions()) return
         
+        // Check if this is a new track (reset position tracking)
+        if (currentMediaMetadata?.title != metadata.title) {
+            Log.d(TAG, "🆕 New track detected in BLE layer, resetting position tracking")
+            lastSentPositionSeconds = -1L
+        }
+        
         // Store current metadata for new connections
         currentMediaMetadata = metadata
         
@@ -837,13 +845,25 @@ class BleManager(private val context: Context) {
         
         // Add duration and position if available
         metadata.duration?.let { duration ->
-            val durationBytes = ByteBuffer.allocate(4).putInt(duration.toInt()).array()
+            // Encode duration according to MCS spec: 4 bytes representing centiseconds (0.01s resolution)
+            val durationCentiseconds = (duration / 10).toInt() // Convert ms to centiseconds
+            val durationBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(durationCentiseconds).array()
             notifyCharacteristicBytes(DURATION_UUID, durationBytes)
         }
         
         metadata.position?.let { position ->
-            val positionBytes = ByteBuffer.allocate(4).putInt(position.toInt()).array()
+            val positionSeconds = position / 1000L
+            
+            // Temporarily send all position updates for debugging
+            Log.d(TAG, "🔍 DEBUG: Position=${position}ms (${positionSeconds}s), LastSent=${lastSentPositionSeconds}s")
+            
+            // Encode position according to MCS spec: 4 bytes representing centiseconds (0.01s resolution)
+            val positionCentiseconds = (position / 10).toInt() // Convert ms to centiseconds
+            val positionBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(positionCentiseconds).array()
+            
+            Log.d(TAG, "🕐 Sending POSITION: ${position}ms (${positionSeconds}s) = ${positionCentiseconds} centiseconds to BLE devices")
             notifyCharacteristicBytes(POSITION_UUID, positionBytes)
+            lastSentPositionSeconds = positionSeconds
         }
         
         // Use MP_NAME for source identification (send as string)

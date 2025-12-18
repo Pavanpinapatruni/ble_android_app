@@ -20,6 +20,19 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
     private val activeControllers = mutableMapOf<String, MediaController>()
     private val controllerCallbacks = mutableMapOf<String, MediaController.Callback>()
     
+    // Position tracking
+    private var lastKnownPosition = 0L
+    private var lastPositionUpdateTime = 0L
+    private var lastSentPositionSeconds = -1L  // Track last sent position in seconds
+    private var isCurrentlyPlaying = false
+    private val positionUpdateHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var positionUpdateRunnable: Runnable? = null
+    
+    // Simple manual position tracking as fallback
+    private var manualPositionTracker = 0L
+    private var trackStartTime = 0L
+    private var useManualTracking = false
+    
     companion object {
         private var instance: MediaListenerService? = null
         private var mediaUpdateListener: ((MediaMetadata) -> Unit)? = null
@@ -71,6 +84,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         }
         
         cleanupMediaControllers()
+        stopPositionUpdates()
         bleManager?.cleanup()
         instance = null
         Log.d(TAG, "MediaListenerService destroyed")
@@ -201,6 +215,42 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
             
             override fun onPlaybackStateChanged(state: PlaybackState?) {
                 super.onPlaybackStateChanged(state)
+                Log.d(TAG, "Playback state changed for ${controller.packageName}: ${state?.state}")
+                
+                // Manage position tracking based on playback state
+                when (state?.state) {
+                    PlaybackState.STATE_PLAYING -> {
+                        Log.d(TAG, "🎵 Media started playing - starting position updates")
+                        // Don't reset position tracking if we already have valid position data
+                        // This preserves the actual current position when connecting mid-song
+                        val currentPos = calculateCurrentPosition(state)
+                        if (currentPos > 0 && !useManualTracking) {
+                            Log.d(TAG, "🎯 Preserving current position: ${currentPos}ms on playback start")
+                            lastKnownPosition = currentPos
+                            lastPositionUpdateTime = System.currentTimeMillis()
+                        } else if (lastSentPositionSeconds == -1L) {
+                            // Only reset if this is truly a new session
+                            Log.d(TAG, "🆕 New playback session - initializing position tracking")
+                            lastKnownPosition = 0L
+                            lastPositionUpdateTime = System.currentTimeMillis()
+                            useManualTracking = false
+                            manualPositionTracker = 0L
+                            trackStartTime = System.currentTimeMillis()
+                        }
+                        // Send state change update immediately
+                        sendStateChangeUpdate(controller, state)
+                        startPositionUpdates()
+                    }
+                    PlaybackState.STATE_PAUSED,
+                    PlaybackState.STATE_STOPPED -> {
+                        Log.d(TAG, "⏸️ Media paused/stopped - stopping position updates")
+                        useManualTracking = false
+                        // Send state change update immediately
+                        sendStateChangeUpdate(controller, state)
+                        stopPositionUpdates()
+                    }
+                }
+                
                 controller.metadata?.let { metadata ->
                     handleMediaSessionMetadata(metadata, state, controller.packageName)
                 }
@@ -253,6 +303,49 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         }
     }
 
+    private fun sendStateChangeUpdate(controller: MediaController, playbackState: PlaybackState) {
+        try {
+            val isPlaying = playbackState.state == PlaybackState.STATE_PLAYING
+            
+            // Update current metadata with new state
+            currentMediaMetadata?.let { metadata ->
+                val updatedMetadata = metadata.copy(
+                    isPlaying = isPlaying,
+                    position = calculateCurrentPosition(playbackState)
+                )
+                currentMediaMetadata = updatedMetadata
+                mediaUpdateListener?.invoke(updatedMetadata)
+                
+                Log.d(TAG, "🔄 State change update sent: Playing=${isPlaying}")
+            } ?: run {
+                // If no current metadata, create basic metadata with state
+                controller.metadata?.let { androidMetadata ->
+                    val title = androidMetadata.getString(AndroidMediaMetadata.METADATA_KEY_TITLE) ?: "Unknown"
+                    val artist = androidMetadata.getString(AndroidMediaMetadata.METADATA_KEY_ARTIST) ?: "Unknown"
+                    val duration = androidMetadata.getLong(AndroidMediaMetadata.METADATA_KEY_DURATION)
+                    val position = calculateCurrentPosition(playbackState)
+                    
+                    val mediaMetadata = MediaMetadata(
+                        title = title,
+                        artist = artist,
+                        album = androidMetadata.getString(AndroidMediaMetadata.METADATA_KEY_ALBUM) ?: "",
+                        duration = if (duration > 0) duration else 0L,
+                        position = position,
+                        isPlaying = isPlaying,
+                        packageName = controller.packageName
+                    )
+                    
+                    currentMediaMetadata = mediaMetadata
+                    mediaUpdateListener?.invoke(mediaMetadata)
+                    
+                    Log.d(TAG, "🆕 Created metadata for state change: Playing=${isPlaying}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending state change update", e)
+        }
+    }
+    
     private fun handleMediaSessionMetadata(
         metadata: AndroidMediaMetadata, 
         playbackState: PlaybackState?, 
@@ -265,7 +358,10 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
             val artist = metadata.getString(AndroidMediaMetadata.METADATA_KEY_ARTIST)
             val album = metadata.getString(AndroidMediaMetadata.METADATA_KEY_ALBUM)
             val duration = metadata.getLong(AndroidMediaMetadata.METADATA_KEY_DURATION)
-            val position = playbackState?.position ?: 0L
+            val position = calculateCurrentPosition(playbackState)
+            val positionSeconds = position / 1000L
+            
+            Log.d(TAG, "🕐 Position tracking - Raw: ${playbackState?.position ?: "null"}, Calculated: ${position}ms (${positionSeconds}s), Playing: $isPlaying")
             
             val mediaMetadata = MediaMetadata(
                 title = title,
@@ -273,14 +369,40 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                 album = album,
                 packageName = packageName,
                 isPlaying = isPlaying,
-                duration = duration,
+                duration = if (duration > 0) duration else 0L,
                 position = position
             )
             
-            currentMediaMetadata = mediaMetadata
-            mediaUpdateListener?.invoke(mediaMetadata)
+            // Check if this is a new track (reset position tracking)
+            if (currentMediaMetadata?.title != title) {
+                Log.d(TAG, "🆕 New track detected, resetting position tracking")
+                lastSentPositionSeconds = -1L
+                lastKnownPosition = 0L
+                lastPositionUpdateTime = System.currentTimeMillis()
+                useManualTracking = false
+                manualPositionTracker = 0L
+                trackStartTime = System.currentTimeMillis()
+                
+                // For new tracks, update metadata immediately
+                currentMediaMetadata = mediaMetadata
+                mediaUpdateListener?.invoke(mediaMetadata)
+            } else {
+                // Check if playing state has changed for existing track
+                val stateChanged = currentMediaMetadata?.isPlaying != isPlaying
+                
+                if (stateChanged) {
+                    Log.d(TAG, "🎭 State changed for existing track: ${currentMediaMetadata?.isPlaying} → $isPlaying")
+                    currentMediaMetadata = mediaMetadata
+                    mediaUpdateListener?.invoke(mediaMetadata)
+                } else {
+                    // For existing tracks with same state, only update metadata but don't invoke listener
+                    // (position updates are handled by the periodic updater)
+                    currentMediaMetadata = mediaMetadata
+                    Log.d(TAG, "📝 Updated metadata for existing track (position updates handled separately)")
+                }
+            }
             
-            Log.d(TAG, "Media Session - Title: $title, Artist: $artist, Album: $album, Playing: $isPlaying, Package: $packageName")
+            Log.d(TAG, "Media Session - Title: $title, Artist: $artist, Album: $album, Playing: $isPlaying, Position: ${positionSeconds}s, Package: $packageName")
         } catch (e: Exception) {
             Log.e(TAG, "Error handling media session metadata", e)
         }
@@ -441,6 +563,123 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
             "No active media controllers"
         } else {
             "Active controllers: ${activeControllers.keys.joinToString(", ")}"
+        }
+    }
+    
+    /**
+     * Calculate current position based on playback state and elapsed time
+     */
+    private fun calculateCurrentPosition(playbackState: PlaybackState?): Long {
+        if (playbackState == null) {
+            Log.d(TAG, "⚠️ PlaybackState is null, using manual tracking")
+            return if (useManualTracking && isCurrentlyPlaying) {
+                val elapsed = System.currentTimeMillis() - trackStartTime
+                manualPositionTracker + elapsed
+            } else 0L
+        }
+        
+        val rawPosition = playbackState.position
+        val lastUpdateTime = playbackState.lastPositionUpdateTime
+        val playbackSpeed = playbackState.playbackSpeed
+        val currentState = playbackState.state
+        
+        Log.d(TAG, "🔍 PlaybackState details: position=$rawPosition, updateTime=$lastUpdateTime, speed=$playbackSpeed, state=$currentState")
+        
+        // Accept any non-negative position (including 0 at start of track)
+        if (rawPosition >= 0 && lastUpdateTime > 0) {
+            Log.d(TAG, "✅ Using valid PlaybackState position: $rawPosition")
+            useManualTracking = false
+            
+            val currentTime = System.currentTimeMillis()
+            val timeSinceUpdate = currentTime - lastUpdateTime
+            
+            // Update our tracking variables
+            lastKnownPosition = rawPosition
+            lastPositionUpdateTime = lastUpdateTime
+            isCurrentlyPlaying = playbackState.state == PlaybackState.STATE_PLAYING
+            
+            // Calculate estimated current position
+            if (isCurrentlyPlaying && playbackSpeed > 0 && timeSinceUpdate < 60000) {
+                val estimatedPosition = rawPosition + (timeSinceUpdate * playbackSpeed).toLong()
+                Log.d(TAG, "📊 Position calc - Raw: $rawPosition, Elapsed: ${timeSinceUpdate}ms, Speed: $playbackSpeed, Estimated: $estimatedPosition")
+                return estimatedPosition.coerceAtLeast(0)
+            }
+            return rawPosition
+        }
+        
+        // Fallback to manual tracking only if we really can't get position from PlaybackState
+        Log.d(TAG, "🔄 PlaybackState position unavailable, checking manual tracking")
+        
+        if (!useManualTracking && currentState == PlaybackState.STATE_PLAYING) {
+            Log.d(TAG, "🆕 Starting manual position tracking from last known position")
+            useManualTracking = true
+            manualPositionTracker = lastKnownPosition
+            trackStartTime = System.currentTimeMillis()
+            return lastKnownPosition
+        }
+        
+        if (useManualTracking && currentState == PlaybackState.STATE_PLAYING) {
+            val elapsed = System.currentTimeMillis() - trackStartTime
+            val currentPosition = manualPositionTracker + elapsed
+            Log.d(TAG, "⏱️ Manual tracking: ${currentPosition}ms (${elapsed}ms elapsed)")
+            return currentPosition
+        }
+        
+        Log.d(TAG, "🚫 No position tracking available")
+        return lastKnownPosition.coerceAtLeast(0L)
+    }
+    
+    /**
+     * Start periodic position updates for currently playing media
+     */
+    private fun startPositionUpdates() {
+        stopPositionUpdates() // Stop any existing updates
+        
+        positionUpdateRunnable = object : Runnable {
+            override fun run() {
+                try {
+                    getCurrentActiveController()?.let { controller ->
+                        val playbackState = controller.playbackState
+                        if (playbackState?.state == PlaybackState.STATE_PLAYING && currentMediaMetadata != null) {
+                            val currentPosition = calculateCurrentPosition(playbackState)
+                            val currentPositionSeconds = (currentPosition / 1000).toInt()
+                            
+                            // Only update if position has changed by at least 1 second
+                            if (currentPositionSeconds != lastSentPositionSeconds.toInt()) {
+                                val updatedMetadata = currentMediaMetadata!!.copy(position = currentPosition)
+                                currentMediaMetadata = updatedMetadata
+                                mediaUpdateListener?.invoke(updatedMetadata)
+                                
+                                Log.d(TAG, "🔄 Position update: ${currentPositionSeconds}s (${currentPosition}ms)")
+                                lastSentPositionSeconds = currentPositionSeconds.toLong()
+                            }
+                            
+                            // Schedule next update
+                            positionUpdateHandler.postDelayed(this, 1000)
+                        } else {
+                            Log.d(TAG, "⏹️ Position updates stopped - not playing or no metadata")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error during position update", e)
+                }
+            }
+        }
+        
+        // Add small delay to prevent rapid-fire updates when changing tracks
+        val initialDelay = if (lastSentPositionSeconds == -1L) 500L else 100L
+        positionUpdateHandler.postDelayed(positionUpdateRunnable!!, initialDelay)
+        Log.d(TAG, "▶️ Started position updates with ${initialDelay}ms delay")
+    }
+    
+    /**
+     * Stop periodic position updates
+     */
+    private fun stopPositionUpdates() {
+        positionUpdateRunnable?.let {
+            positionUpdateHandler.removeCallbacks(it)
+            positionUpdateRunnable = null
+            Log.d(TAG, "⏹️ Stopped position updates")
         }
     }
 }
