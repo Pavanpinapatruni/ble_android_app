@@ -114,7 +114,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         // Use a handler to periodically refresh active sessions
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (mediaSessionManager != null) {
-                Log.d(TAG, "🔄 Periodic refresh of active media sessions")
+                Log.d(TAG, "Periodic refresh of active media sessions")
                 updateActiveMediaControllers()
                 startPeriodicRefresh() // Schedule next refresh
             }
@@ -123,7 +123,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
     
     // Implementation of OnActiveSessionsChangedListener
     override fun onActiveSessionsChanged(controllers: List<MediaController>?) {
-        Log.d(TAG, "🔄 Active sessions changed! Found ${controllers?.size ?: 0} controllers")
+        Log.d(TAG, "Active sessions changed! Found ${controllers?.size ?: 0} controllers")
         
         // Clean up old controllers that are no longer active
         val currentPackages = controllers?.map { it.packageName }?.toSet() ?: emptySet()
@@ -131,7 +131,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         
         // Remove controllers for apps that are no longer active
         oldPackages.subtract(currentPackages).forEach { packageName ->
-            Log.d(TAG, "📱 Removing controller for closed app: $packageName")
+            Log.d(TAG, "Removing controller for closed app: $packageName")
             controllerCallbacks[packageName]?.let { callback ->
                 activeControllers[packageName]?.unregisterCallback(callback)
             }
@@ -143,7 +143,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         controllers?.forEach { controller ->
             val packageName = controller.packageName
             if (isMediaApp(packageName) && !activeControllers.containsKey(packageName)) {
-                Log.d(TAG, "📱 Adding controller for new app: $packageName")
+                Log.d(TAG, "Adding controller for new app: $packageName")
                 activeControllers[packageName] = controller
                 setupControllerCallback(controller)
                 
@@ -161,7 +161,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                 ComponentName(this, MediaListenerService::class.java)
             ) ?: emptyList()
             
-            Log.d(TAG, "🔍 Updating active media controllers. Found ${activeSessions.size} active sessions")
+            Log.d(TAG, "Updating active media controllers. Found ${activeSessions.size} active sessions")
             
             // Get current active packages
             val currentPackages = activeSessions.map { it.packageName }.toSet()
@@ -169,7 +169,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
             
             // Clean up controllers for packages that are no longer active
             knownPackages.subtract(currentPackages).forEach { packageName ->
-                Log.d(TAG, "🗑️ Removing controller for inactive app: $packageName")
+                Log.d(TAG, "Removing controller for inactive app: $packageName")
                 controllerCallbacks[packageName]?.let { callback ->
                     activeControllers[packageName]?.unregisterCallback(callback)
                 }
@@ -220,17 +220,17 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                 // Manage position tracking based on playback state
                 when (state?.state) {
                     PlaybackState.STATE_PLAYING -> {
-                        Log.d(TAG, "🎵 Media started playing - starting position updates")
+                        Log.d(TAG, "Media started playing - starting position updates")
                         // Don't reset position tracking if we already have valid position data
                         // This preserves the actual current position when connecting mid-song
                         val currentPos = calculateCurrentPosition(state)
                         if (currentPos > 0 && !useManualTracking) {
-                            Log.d(TAG, "🎯 Preserving current position: ${currentPos}ms on playback start")
+                            Log.d(TAG, "Preserving current position: ${currentPos}ms on playback start")
                             lastKnownPosition = currentPos
                             lastPositionUpdateTime = System.currentTimeMillis()
                         } else if (lastSentPositionSeconds == -1L) {
                             // Only reset if this is truly a new session
-                            Log.d(TAG, "🆕 New playback session - initializing position tracking")
+                            Log.d(TAG, "New playback session - initializing position tracking")
                             lastKnownPosition = 0L
                             lastPositionUpdateTime = System.currentTimeMillis()
                             useManualTracking = false
@@ -243,7 +243,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                     }
                     PlaybackState.STATE_PAUSED,
                     PlaybackState.STATE_STOPPED -> {
-                        Log.d(TAG, "⏸️ Media paused/stopped - stopping position updates")
+                        Log.d(TAG, "Media paused/stopped - stopping position updates")
                         useManualTracking = false
                         // Send state change update immediately
                         sendStateChangeUpdate(controller, state)
@@ -316,7 +316,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                 currentMediaMetadata = updatedMetadata
                 mediaUpdateListener?.invoke(updatedMetadata)
                 
-                Log.d(TAG, "🔄 State change update sent: Playing=${isPlaying}")
+                Log.d(TAG, "State change update sent: Playing=${isPlaying}")
             } ?: run {
                 // If no current metadata, create basic metadata with state
                 controller.metadata?.let { androidMetadata ->
@@ -338,7 +338,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                     currentMediaMetadata = mediaMetadata
                     mediaUpdateListener?.invoke(mediaMetadata)
                     
-                    Log.d(TAG, "🆕 Created metadata for state change: Playing=${isPlaying}")
+                    Log.d(TAG, "Created metadata for state change: Playing=${isPlaying}")
                 }
             }
         } catch (e: Exception) {
@@ -375,7 +375,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
             
             // Check if this is a new track (reset position tracking)
             if (currentMediaMetadata?.title != title) {
-                Log.d(TAG, "🆕 New track detected, resetting position tracking")
+                Log.d(TAG, "New track detected, resetting position tracking")
                 lastSentPositionSeconds = -1L
                 lastKnownPosition = 0L
                 lastPositionUpdateTime = System.currentTimeMillis()
@@ -398,7 +398,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                     // For existing tracks with same state, only update metadata but don't invoke listener
                     // (position updates are handled by the periodic updater)
                     currentMediaMetadata = mediaMetadata
-                    Log.d(TAG, "📝 Updated metadata for existing track (position updates handled separately)")
+                    Log.d(TAG, "Updated metadata for existing track (position updates handled separately)")
                 }
             }
             
@@ -477,7 +477,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
     
     // Media control methods for BLE commands
     fun executeMediaCommand(command: Int): Boolean {
-        Log.d(TAG, "🎮 Executing media command: 0x${"%02x".format(command)}")
+        Log.d(TAG, "Executing media command: 0x${"%02x".format(command)}")
         
         // Find the active media controller (prioritize currently playing)
         val activeController = activeControllers.values.firstOrNull { controller ->
@@ -485,69 +485,69 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         } ?: activeControllers.values.firstOrNull()
         
         if (activeController == null) {
-            Log.w(TAG, "❌ No active media controller found for command execution")
-            Log.d(TAG, "📊 Available controllers: ${activeControllers.keys}")
+            Log.w(TAG, "No active media controller found for command execution")
+            Log.d(TAG, "Available controllers: ${activeControllers.keys}")
             return false
         }
         
         try {
             val transportControls = activeController.transportControls
             val playbackState = activeController.playbackState
-            Log.d(TAG, "🎵 Using controller for: ${activeController.packageName}")
-            Log.d(TAG, "🎵 Current playback state: ${playbackState?.state}")
+            Log.d(TAG, "Using controller for: ${activeController.packageName}")
+            Log.d(TAG, "Current playback state: ${playbackState?.state}")
             
             when (command) {
                 0x01 -> {
-                    Log.d(TAG, "▶️ Executing PLAY command")
+                    Log.d(TAG, "Executing PLAY command")
                     transportControls.play()
                 }
                 0x02 -> {
-                    Log.d(TAG, "⏸️ Executing PAUSE command")
+                    Log.d(TAG, "Executing PAUSE command")
                     transportControls.pause()
                 }
                 0x03 -> {
-                    Log.d(TAG, "⏹️ Executing STOP command")
+                    Log.d(TAG, "Executing STOP command")
                     transportControls.stop()
                 }
                 0x04 -> {
-                    Log.d(TAG, "⏭️ Executing NEXT TRACK command")
+                    Log.d(TAG, "Executing NEXT TRACK command")
                     transportControls.skipToNext()
                 }
                 0x05 -> {
-                    Log.d(TAG, "⏮️ Executing PREVIOUS TRACK command")
+                    Log.d(TAG, "Executing PREVIOUS TRACK command")
                     transportControls.skipToPrevious()
                 }
                 0x10 -> {
-                    Log.d(TAG, "⏪ Executing FAST REWIND command")
+                    Log.d(TAG, "Executing FAST REWIND command")
                     transportControls.rewind()
                 }
                 0x11 -> {
-                    Log.d(TAG, "⏩ Executing FAST FORWARD command")
+                    Log.d(TAG, "Executing FAST FORWARD command")
                     transportControls.fastForward()
                 }
                 0x30 -> {
-                    Log.d(TAG, "🔀 GOTO command received (not implemented)")
+                    Log.d(TAG, "GOTO command received (not implemented)")
                     Log.w(TAG, "GOTO command requires position parameter - not supported yet")
                     return false
                 }
                 else -> {
-                    Log.w(TAG, "❓ Unsupported command: 0x${"%02x".format(command)}")
+                    Log.w(TAG, "Unsupported command: 0x${"%02x".format(command)}")
                     return false
                 }
             }
             
-            Log.d(TAG, "✅ Media command executed successfully")
+            Log.d(TAG, "Media command executed successfully")
             
             // Give a small delay for the command to take effect, then check state
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 val newState = activeController.playbackState
-                Log.d(TAG, "🔄 Playback state after command: ${newState?.state}")
+                Log.d(TAG, "Playback state after command: ${newState?.state}")
             }, 500)
             
             return true
             
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Error executing media command", e)
+            Log.e(TAG, "Error executing media command", e)
             return false
         }
     }
@@ -571,7 +571,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
      */
     private fun calculateCurrentPosition(playbackState: PlaybackState?): Long {
         if (playbackState == null) {
-            Log.d(TAG, "⚠️ PlaybackState is null, using manual tracking")
+            Log.d(TAG, "PlaybackState is null, using manual tracking")
             return if (useManualTracking && isCurrentlyPlaying) {
                 val elapsed = System.currentTimeMillis() - trackStartTime
                 manualPositionTracker + elapsed
@@ -583,11 +583,11 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         val playbackSpeed = playbackState.playbackSpeed
         val currentState = playbackState.state
         
-        Log.d(TAG, "🔍 PlaybackState details: position=$rawPosition, updateTime=$lastUpdateTime, speed=$playbackSpeed, state=$currentState")
+        Log.d(TAG, "PlaybackState details: position=$rawPosition, updateTime=$lastUpdateTime, speed=$playbackSpeed, state=$currentState")
         
         // Accept any non-negative position (including 0 at start of track)
         if (rawPosition >= 0 && lastUpdateTime > 0) {
-            Log.d(TAG, "✅ Using valid PlaybackState position: $rawPosition")
+            Log.d(TAG, "Using valid PlaybackState position: $rawPosition")
             useManualTracking = false
             
             val currentTime = System.currentTimeMillis()
@@ -601,17 +601,17 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
             // Calculate estimated current position
             if (isCurrentlyPlaying && playbackSpeed > 0 && timeSinceUpdate < 60000) {
                 val estimatedPosition = rawPosition + (timeSinceUpdate * playbackSpeed).toLong()
-                Log.d(TAG, "📊 Position calc - Raw: $rawPosition, Elapsed: ${timeSinceUpdate}ms, Speed: $playbackSpeed, Estimated: $estimatedPosition")
+                Log.d(TAG, "Position calc - Raw: $rawPosition, Elapsed: ${timeSinceUpdate}ms, Speed: $playbackSpeed, Estimated: $estimatedPosition")
                 return estimatedPosition.coerceAtLeast(0)
             }
             return rawPosition
         }
         
         // Fallback to manual tracking only if we really can't get position from PlaybackState
-        Log.d(TAG, "🔄 PlaybackState position unavailable, checking manual tracking")
+        Log.d(TAG, "PlaybackState position unavailable, checking manual tracking")
         
         if (!useManualTracking && currentState == PlaybackState.STATE_PLAYING) {
-            Log.d(TAG, "🆕 Starting manual position tracking from last known position")
+            Log.d(TAG, "Starting manual position tracking from last known position")
             useManualTracking = true
             manualPositionTracker = lastKnownPosition
             trackStartTime = System.currentTimeMillis()
@@ -621,11 +621,11 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         if (useManualTracking && currentState == PlaybackState.STATE_PLAYING) {
             val elapsed = System.currentTimeMillis() - trackStartTime
             val currentPosition = manualPositionTracker + elapsed
-            Log.d(TAG, "⏱️ Manual tracking: ${currentPosition}ms (${elapsed}ms elapsed)")
+            Log.d(TAG, "Manual tracking: ${currentPosition}ms (${elapsed}ms elapsed)")
             return currentPosition
         }
         
-        Log.d(TAG, "🚫 No position tracking available")
+        Log.d(TAG, "No position tracking available")
         return lastKnownPosition.coerceAtLeast(0L)
     }
     
@@ -650,14 +650,14 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
                                 currentMediaMetadata = updatedMetadata
                                 mediaUpdateListener?.invoke(updatedMetadata)
                                 
-                                Log.d(TAG, "🔄 Position update: ${currentPositionSeconds}s (${currentPosition}ms)")
+                                Log.d(TAG, "Position update: ${currentPositionSeconds}s (${currentPosition}ms)")
                                 lastSentPositionSeconds = currentPositionSeconds.toLong()
                             }
                             
                             // Schedule next update
                             positionUpdateHandler.postDelayed(this, 1000)
                         } else {
-                            Log.d(TAG, "⏹️ Position updates stopped - not playing or no metadata")
+                            Log.d(TAG, "Position updates stopped - not playing or no metadata")
                         }
                     }
                 } catch (e: Exception) {
@@ -669,7 +669,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         // Add small delay to prevent rapid-fire updates when changing tracks
         val initialDelay = if (lastSentPositionSeconds == -1L) 500L else 100L
         positionUpdateHandler.postDelayed(positionUpdateRunnable!!, initialDelay)
-        Log.d(TAG, "▶️ Started position updates with ${initialDelay}ms delay")
+        Log.d(TAG, "Started position updates with ${initialDelay}ms delay")
     }
     
     /**
@@ -679,7 +679,7 @@ class MediaListenerService : NotificationListenerService(), MediaSessionManager.
         positionUpdateRunnable?.let {
             positionUpdateHandler.removeCallbacks(it)
             positionUpdateRunnable = null
-            Log.d(TAG, "⏹️ Stopped position updates")
+            Log.d(TAG, "Stopped position updates")
         }
     }
 }

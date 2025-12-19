@@ -56,7 +56,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
      * Creates the MCS GATT service with all required characteristics
      */
     fun createMediaControlService(): BluetoothGattService {
-        Log.d(TAG, "🎵 Creating Media Control Service (MCS)")
+        Log.d(TAG, "Creating Media Control Service (MCS)")
         
         val service = BluetoothGattService(MEDIA_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         
@@ -105,7 +105,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         mcpOpcodeSupportedChar.value = supportedOpcodes
         service.addCharacteristic(mcpOpcodeSupportedChar)
         
-        Log.d(TAG, "✅ Media Control Service created with ${service.characteristics.size} characteristics")
+        Log.d(TAG, "Media Control Service created with ${service.characteristics.size} characteristics")
         return service
     }
     
@@ -140,7 +140,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         
         // Check if this is a new track (reset position tracking)
         if (currentMediaMetadata?.title != metadata.title) {
-            Log.d(TAG, "🆕 New track detected in MediaManager, resetting position tracking")
+            Log.d(TAG, "New track detected in MediaManager, resetting position tracking")
             lastSentPositionSeconds = -1L
         }
         
@@ -151,12 +151,12 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         val lastTitle = lastSentValues[TITLE_UUID]
         if (metadata.title != null && lastTitle != metadata.title) {
             trackChangeCounter++
-            Log.d(TAG, "🎵 Track changed! Counter: $trackChangeCounter")
+            Log.d(TAG, "Track changed! Counter: $trackChangeCounter")
         }
         
         // MCS Standard Characteristics
         metadata.title?.let { 
-            Log.d(TAG, "🎵 Sending TITLE: '$it'")
+            Log.d(TAG, "Sending TITLE: '$it'")
             notifyCharacteristic(TITLE_UUID, it) 
         }
         
@@ -175,7 +175,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
             val positionSeconds = position / 1000L
             
             // Temporarily send all position updates for debugging
-            Log.d(TAG, "🔍 DEBUG: Position=${position}ms (${positionSeconds}s), LastSent=${lastSentPositionSeconds}s")
+            Log.d(TAG, "DEBUG: Position=${position}ms (${positionSeconds}s), LastSent=${lastSentPositionSeconds}s")
             
             // Encode position according to MCS spec: 4 bytes representing centiseconds (0.01s resolution)
             val positionCentiseconds = (position / 10).toInt() // Convert ms to centiseconds
@@ -189,7 +189,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         // Use MP_NAME for source identification (send as string)
         metadata.packageName?.let { packageName ->
             val appName = getAppNameFromPackage(packageName)
-            Log.d(TAG, "🎵 Sending MP_NAME (String): '$appName' for $packageName")
+            Log.d(TAG, "Sending MP_NAME (String): '$appName' for $packageName")
             notifyCharacteristic(MP_NAME_UUID, appName)
         }
         
@@ -204,12 +204,12 @@ class MediaManager(private val bleManager: BleManagerInterface) {
             2 -> "Paused"
             else -> "Inactive"
         }
-        Log.d(TAG, "🎵 Sending STATE: $mcsStateName (code: $mcsStateCode, byte: ${mcsStateCode.toByte()})")
+        Log.d(TAG, "Sending STATE: $mcsStateName (code: $mcsStateCode, byte: ${mcsStateCode.toByte()})")
         notifyCharacteristicBytes(STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
         
         // Clear recently connected devices after sending initial notifications
         if (recentlyConnectedDevices.isNotEmpty()) {
-            Log.d(TAG, "🧹 Clearing recently connected devices list (${recentlyConnectedDevices.size} devices)")
+            Log.d(TAG, "Clearing recently connected devices list (${recentlyConnectedDevices.size} devices)")
             recentlyConnectedDevices.clear()
         }
         
@@ -252,7 +252,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         val shouldSendToAllDevices = hasChanged
         
         if (!shouldSendToAllDevices && !shouldSendToNewDevices) {
-            Log.d(TAG, "📋 No change for $uuid: '$value' and no new devices (skipping notification)")
+            Log.d(TAG, "No change for $uuid: '$value' and no new devices (skipping notification)")
             return
         }
 
@@ -263,19 +263,19 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         val connectedDevices = bleManager.getConnectedDevices()
         if (shouldSendToAllDevices) {
             // Send to all connected devices on value change
-            Log.d(TAG, "🔄 Value changed for $uuid: '$lastValue' → '$value'")
+            Log.d(TAG, "Value changed for $uuid: '$lastValue' → '$value'")
             connectedDevices.forEach { device ->
                 val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
-                Log.d(TAG, "📡 Notify $uuid to ${device.address} (change) → $ok")
+                Log.d(TAG, "Notify $uuid to ${device.address} (change) → $ok")
             }
             // Update last sent value
             lastSentValues[uuid] = value
         } else if (shouldSendToNewDevices) {
             // Send only to recently connected devices (same value)
-            Log.d(TAG, "🆕 Sending current value for $uuid to newly connected devices: '$value'")
+            Log.d(TAG, "Sending current value for $uuid to newly connected devices: '$value'")
             recentlyConnectedDevices.forEach { device ->
                 val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
-                Log.d(TAG, "📡 Notify $uuid to ${device.address} (new device) → $ok")
+                Log.d(TAG, "Notify $uuid to ${device.address} (new device) → $ok")
             }
         }
     }
@@ -297,12 +297,12 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         val shouldSendToAllDevices = hasChanged
         
         if (!shouldSendToAllDevices && !shouldSendToNewDevices) {
-            Log.d(TAG, "📋 No change for $uuid: ${value.contentToString()} and no new devices (skipping notification)")
+            Log.d(TAG, "No change for $uuid: ${value.contentToString()} and no new devices (skipping notification)")
             return
         }
 
         // Log the byte details for debugging
-        Log.d(TAG, "🔢 notifyCharacteristicBytes for ${getCharacteristicName(uuid)}:")
+        Log.d(TAG, "notifyCharacteristicBytes for ${getCharacteristicName(uuid)}:")
         Log.d(TAG, "    Raw bytes: ${value.contentToString()}")
         Log.d(TAG, "    Decimal values: ${value.joinToString(", ") { (it.toInt() and 0xFF).toString() }}")
         Log.d(TAG, "    Hex values: ${value.joinToString(", ") { "0x%02X".format(it.toInt() and 0xFF) }}")
@@ -314,17 +314,17 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         val connectedDevices = bleManager.getConnectedDevices()
         if (shouldSendToAllDevices) {
             // Send to all connected devices on value change
-            Log.d(TAG, "🔄 Value changed for $uuid: '${lastValue?.contentToString() ?: "null"}' → '${value.contentToString()}'")
+            Log.d(TAG, "Value changed for $uuid: '${lastValue?.contentToString() ?: "null"}' → '${value.contentToString()}'")
             connectedDevices.forEach { device ->
                 val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
-                Log.d(TAG, "📡 Notify $uuid to ${device.address} (change) → $ok")
+                Log.d(TAG, "Notify $uuid to ${device.address} (change) → $ok")
             }
         } else if (shouldSendToNewDevices) {
             // Send only to recently connected devices
-            Log.d(TAG, "🆕 Sending current value for $uuid to newly connected devices: ${value.contentToString()}")
+            Log.d(TAG, "Sending current value for $uuid to newly connected devices: ${value.contentToString()}")
             recentlyConnectedDevices.forEach { device ->
                 val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
-                Log.d(TAG, "📡 Notify $uuid to ${device.address} (new device) → $ok")
+                Log.d(TAG, "Notify $uuid to ${device.address} (new device) → $ok")
             }
         }
     }
@@ -353,13 +353,13 @@ class MediaManager(private val bleManager: BleManagerInterface) {
         if (value.isEmpty()) return 0
         
         val rawCommand = value[0].toInt() and 0xFF
-        Log.d(TAG, "📱 MCP Command received: 0x${"%02x".format(rawCommand)}")
+        Log.d(TAG, "MCP Command received: 0x${"%02x".format(rawCommand)}")
         
         // Map TI chip commands to standard MCS commands
         val command = mapTiChipCommand(rawCommand)
         
         if (command != rawCommand) {
-            Log.d(TAG, "🔄 TI Chip mapping: 0x${"%02x".format(rawCommand)} → 0x${"%02x".format(command)}")
+            Log.d(TAG, "TI Chip mapping: 0x${"%02x".format(rawCommand)} → 0x${"%02x".format(command)}")
         }
         
         return command
@@ -381,7 +381,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
      */
     fun addRecentlyConnectedDevice(device: BluetoothDevice) {
         recentlyConnectedDevices.add(device)
-        Log.d(TAG, "📱 Added recently connected device: ${device.address}")
+        Log.d(TAG, "Added recently connected device: ${device.address}")
     }
     
     /**
@@ -389,7 +389,7 @@ class MediaManager(private val bleManager: BleManagerInterface) {
      */
     fun sendInitialMediaState(device: BluetoothDevice) {
         currentMediaMetadata?.let { metadata ->
-            Log.d(TAG, "📤 Sending initial media state to ${device.address}")
+            Log.d(TAG, "Sending initial media state to ${device.address}")
             updateMediaMetadata(metadata)
         }
     }
