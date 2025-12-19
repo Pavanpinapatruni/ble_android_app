@@ -8,8 +8,10 @@ import com.example.ble.ble.BleManager
 import com.example.ble.models.BleDevice
 import com.example.ble.models.MediaMetadata
 import com.example.ble.models.PhoneCallInfo
+import com.example.ble.models.CallMetadata
 import com.example.ble.receivers.PhoneStateReceiver
 import com.example.ble.services.MediaListenerService
+import com.example.ble.services.CallListenerService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,6 +43,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MediaListenerService.setBleManager(bleManager)
         setupMediaListener()
         setupPhoneStateListener()
+        
+        // Start call monitoring service
+        CallListenerService.startService(application, bleManager)
+        Log.d("MainViewModel", "CallListenerService started")
     }
 
     private fun setupMediaListener() {

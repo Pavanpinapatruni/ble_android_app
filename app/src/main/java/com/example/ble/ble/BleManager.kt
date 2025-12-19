@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.example.ble.models.BleDevice
 import com.example.ble.models.MediaMetadata
+import com.example.ble.models.CallMetadata
 import com.example.ble.utils.PermissionUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,7 +66,12 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
     // Media Manager for MCS operations (implements ServiceManager concept)
     private val mediaManager = MediaManager(this)
     
+    // Call Manager for TBS operations
+    private val callManager = CallManager(this)
     
+    // Current call metadata tracking
+    private var currentCallMetadata: CallMetadata? = null
+
     // State flows for UI
     private val _scannedDevices = MutableStateFlow<List<BleDevice>>(emptyList())
     val scannedDevices: StateFlow<List<BleDevice>> = _scannedDevices.asStateFlow()
@@ -187,8 +193,9 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
                     deviceSubscriptions[device] = mutableSetOf()
                     connectedDevices.add(device)
                     
-                    // Notify MediaManager of new connection
+                    // Notify service managers of new connection
                     mediaManager.addRecentlyConnectedDevice(device)
+                    callManager.addRecentlyConnectedDevice(device)
                     
                     Log.d(TAG, "TI chip ready for subscriptions")
                     Log.d(TAG, "   Total connected GATT server devices: ${subscribedDevices.size}")
@@ -263,7 +270,7 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
                     // Start active monitoring of TI chip behavior
                     startTiChipMonitoring(device)
                     
-                    // Send initial notifications with current media state
+                    // Send initial notifications with current media and call state
                     sendInitialNotifications(device)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -284,50 +291,90 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
         }
         
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            val serviceName = when (service.uuid) {
+                UUID.fromString("00001800-0000-1000-8000-00805f9b34fb") -> "Generic Access Service"
+                MediaManager.MEDIA_SERVICE_UUID -> "Media Control Service (MCS)"
+                CallManager.TBS_SERVICE_UUID -> "Telephone Bearer Service (TBS)"
+                else -> "Unknown Service"
+            }
+            
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "MCS SERVICE SUCCESSFULLY ADDED TO GATT SERVER!")
+                Log.d(TAG, "$serviceName SUCCESSFULLY ADDED TO GATT SERVER!")
                 Log.d(TAG, "   Service UUID: ${service.uuid}")
                 Log.d(TAG, "   Service Type: ${if (service.type == BluetoothGattService.SERVICE_TYPE_PRIMARY) "PRIMARY" else "SECONDARY"}")
                 Log.d(TAG, "   Characteristics count: ${service.characteristics.size}")
                 
-                // Verify all our characteristics are present
-                val expectedChars = listOf(
-                    MediaManager.MP_NAME_UUID to "MP_NAME",
-                    MediaManager.TRACK_CHANGED_UUID to "TRACK_CHANGED", 
-                    MediaManager.TITLE_UUID to "TITLE",
-                    MediaManager.DURATION_UUID to "DURATION",
-                    MediaManager.POSITION_UUID to "POSITION",
-                    MediaManager.STATE_UUID to "STATE",
-                    MediaManager.MCP_UUID to "MCP",
-                    MediaManager.MCP_OPCODE_SUPPORTED_UUID to "MCP_OPCODE_SUPPORTED"
-                )
-                
-                expectedChars.forEach { (uuid, name) ->
-                    val char = service.getCharacteristic(uuid)
-                    if (char != null) {
-                        // Initialize characteristics with proper default values
-                        when (uuid) {
-                            MediaManager.MP_NAME_UUID -> char.value = "MediaPlayer".toByteArray(Charsets.UTF_8) // String
-                            MediaManager.TITLE_UUID -> char.value = "No Media".toByteArray(Charsets.UTF_8)
-                            MediaManager.STATE_UUID -> char.value = byteArrayOf(0) // Numeric: 0=Inactive
-                            MediaManager.TRACK_CHANGED_UUID -> char.value = byteArrayOf(0x00)
-                            MediaManager.DURATION_UUID -> char.value = ByteArray(4) { 0 }
-                            MediaManager.POSITION_UUID -> char.value = ByteArray(4) { 0 }
-                            MediaManager.MCP_OPCODE_SUPPORTED_UUID -> char.value = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
+                // Service-specific initialization
+                when (service.uuid) {
+                    MediaManager.MEDIA_SERVICE_UUID -> {
+                        Log.d(TAG, "MCS service ready - verifying characteristics...")
+                        // Verify all MCS characteristics are present
+                        val expectedMcsChars = listOf(
+                            MediaManager.MP_NAME_UUID to "MP_NAME",
+                            MediaManager.TRACK_CHANGED_UUID to "TRACK_CHANGED", 
+                            MediaManager.TITLE_UUID to "TITLE",
+                            MediaManager.DURATION_UUID to "DURATION",
+                            MediaManager.POSITION_UUID to "POSITION",
+                            MediaManager.STATE_UUID to "STATE",
+                            MediaManager.MCP_UUID to "MCP",
+                            MediaManager.MCP_OPCODE_SUPPORTED_UUID to "MCP_OPCODE_SUPPORTED"
+                        )
+                        
+                        expectedMcsChars.forEach { (uuid, name) ->
+                            val char = service.getCharacteristic(uuid)
+                            if (char != null) {
+                                // Initialize characteristics with proper default values
+                                when (uuid) {
+                                    MediaManager.MP_NAME_UUID -> char.value = "MediaPlayer".toByteArray(Charsets.UTF_8)
+                                    MediaManager.TITLE_UUID -> char.value = "No Media".toByteArray(Charsets.UTF_8)
+                                    MediaManager.STATE_UUID -> char.value = byteArrayOf(0)
+                                    MediaManager.TRACK_CHANGED_UUID -> char.value = byteArrayOf(0x00)
+                                    MediaManager.DURATION_UUID -> char.value = ByteArray(4) { 0 }
+                                    MediaManager.POSITION_UUID -> char.value = ByteArray(4) { 0 }
+                                    MediaManager.MCP_OPCODE_SUPPORTED_UUID -> char.value = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
+                                }
+                                Log.d(TAG, "   $name characteristic ready")
+                            } else {
+                                Log.e(TAG, "   MISSING $name characteristic!")
+                            }
                         }
-                        Log.d(TAG, "   $name characteristic ready with value: ${char.value?.contentToString() ?: "null"}")
-                    } else {
-                        Log.e(TAG, "   MISSING $name characteristic!")
+                        Log.d(TAG, "MCS service fully initialized and ready for connections")
+                    }
+                    CallManager.TBS_SERVICE_UUID -> {
+                        Log.d(TAG, "TBS service ready - verifying characteristics...")
+                        // Verify all TBS characteristics are present
+                        val expectedTbsChars = listOf(
+                            CallManager.CALL_STATE_UUID to "CALL_STATE",
+                            CallManager.CALL_CONTROL_POINT_UUID to "CALL_CONTROL_POINT",
+                            CallManager.CALL_FRIENDLY_NAME_UUID to "CALL_FRIENDLY_NAME",
+                            CallManager.TERMINATION_REASON_UUID to "TERMINATION_REASON"
+                        )
+                        
+                        expectedTbsChars.forEach { (uuid, name) ->
+                            val char = service.getCharacteristic(uuid)
+                            if (char != null) {
+                                // Initialize characteristics with proper default values
+                                when (uuid) {
+                                    CallManager.CALL_STATE_UUID -> char.value = byteArrayOf(0x00) // Idle
+                                    CallManager.CALL_FRIENDLY_NAME_UUID -> char.value = "No Active Call".toByteArray(Charsets.UTF_8)
+                                    CallManager.TERMINATION_REASON_UUID -> char.value = byteArrayOf(0x00) // No termination
+                                    CallManager.CALL_CONTROL_POINT_UUID -> char.value = ByteArray(1) { 0 }
+                                }
+                                Log.d(TAG, "   $name characteristic ready")
+                            } else {
+                                Log.e(TAG, "   MISSING $name characteristic!")
+                            }
+                        }
+                        Log.d(TAG, "TBS service fully initialized and ready for connections")
                     }
                 }
-                
-                Log.d(TAG, "GATT Server is now ready for TI chip connections!")
                 
                 // Log comprehensive status for debugging
                 logGattServerStatus()
             } else {
-                Log.e(TAG, "FAILED to add MCS service! Status: $status")
+                Log.e(TAG, "FAILED to add $serviceName! Status: $status")
                 Log.e(TAG, "   Service UUID: ${service.uuid}")
+                Log.e(TAG, "   This may cause ATT_WRITE_RSP timeout issues")
             }
         }
         
@@ -526,6 +573,51 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
                             }
                         }
                     }
+                    CallManager.CALL_CONTROL_POINT_UUID -> {
+                        Log.d(TAG, "CALL CONTROL POINT COMMAND RECEIVED!")
+                        if (value.isNotEmpty()) {
+                            // Enhanced debugging: log full byte array
+                            Log.d(TAG, "   Raw bytes: ${value.contentToString()}")
+                            Log.d(TAG, "   Raw bytes (hex): ${value.joinToString(" ") { "%02x".format(it.toInt() and 0xFF) }}")
+                            Log.d(TAG, "   Array size: ${value.size} bytes")
+                            
+                            // Use proper unsigned byte conversion
+                            val rawCommand = value[0].toInt() and 0xFF
+                            Log.d(TAG, "   Raw command opcode: 0x${"%-02x".format(rawCommand)}")
+                            
+                            // Log the command type
+                            when (rawCommand) {
+                                0x01 -> Log.d(TAG, "   ACCEPT_CALL command")
+                                0x02 -> Log.d(TAG, "   REJECT_CALL command")
+                                0x03 -> Log.d(TAG, "   END_CALL command")
+                                0x04 -> Log.d(TAG, "   HOLD_CALL command")
+                                0x05 -> Log.d(TAG, "   UNHOLD_CALL command")
+                                else -> {
+                                    Log.w(TAG, "   Unknown call command: 0x${"%-02x".format(rawCommand)} (decimal: $rawCommand)")
+                                    Log.d(TAG, "   Valid TBS commands are:")
+                                    Log.d(TAG, "      0x01 = Accept Call, 0x02 = Reject Call, 0x03 = End Call")
+                                    Log.d(TAG, "      0x04 = Hold Call, 0x05 = Unhold Call")
+                                }
+                            }
+                            
+                            // Only execute valid commands
+                            if (rawCommand in listOf(0x01, 0x02, 0x03, 0x04, 0x05)) {
+                                try {
+                                    val success = com.example.ble.services.CallListenerService.executeCallCommand(rawCommand)
+                                    if (success) {
+                                        Log.d(TAG, "Call command executed successfully")
+                                    } else {
+                                        Log.w(TAG, "Failed to execute call command")
+                                        Log.d(TAG, "${com.example.ble.services.CallListenerService.getCallMonitoringInfo()}")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error executing call command", e)
+                                }
+                            } else {
+                                Log.w(TAG, "Skipping execution of unknown call command: 0x${"%-02x".format(rawCommand)}")
+                            }
+                        }
+                    }
                 }
             } else {
                 Log.d(TAG, "Write request with no response needed")
@@ -689,9 +781,10 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
      * @param serviceType The type of service to add
      */
     fun addService(serviceType: String): Boolean {
-        // Handle MCS specifically since MediaManager doesn't implement ServiceManager yet
-        if (serviceType == "MCS") {
-            return addMediaControlServiceInternal()
+        // Handle specific services
+        when (serviceType) {
+            "MCS" -> return addMediaControlServiceInternal()
+            "TBS" -> return addTelephoneBearerServiceInternal()
         }
         
         val manager = serviceManagers[serviceType] as? ServiceManager
@@ -709,7 +802,7 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
         val success = gattServer?.addService(service) ?: false
         if (success) {
             registeredServices[serviceType] = service
-            Log.d(TAG, "Added service: $serviceType (${manager.getServiceName()})")
+            Log.d(TAG, "Added service: $serviceType")
         } else {
             Log.e(TAG, "Failed to add service to GATT server: $serviceType")
         }
@@ -730,6 +823,24 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
         
         if (serviceAdded) {
             registeredServices["MCS"] = service
+        }
+        
+        return serviceAdded
+    }
+    
+    /**
+     * Method that directly adds TBS - used by addService("TBS")
+     */
+    private fun addTelephoneBearerServiceInternal(): Boolean {
+        Log.d(TAG, "Adding Telephone Bearer Service through CallManager")
+        val service = callManager.createTelephoneBearerService()
+        
+        Log.d(TAG, "Adding TBS service to GATT server...")
+        val serviceAdded = gattServer?.addService(service) ?: false
+        Log.d(TAG, "TBS service addition result: $serviceAdded")
+        
+        if (serviceAdded) {
+            registeredServices["TBS"] = service
         }
         
         return serviceAdded
@@ -807,14 +918,22 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
             return
         }
 
-        // Add required Generic Access Service first (mandatory for MCS compliance)
+        // Add required Generic Access Service first (mandatory for compliance)
         addGenericAccessService()
         
-        // Register and add the Media Control Service using generic service management
-        registerMediaService()
-        addService("MCS")
-        
-        Log.d(TAG, "All services queued for addition")
+        // Add services sequentially with delays to prevent GATT server issues
+        handler.postDelayed({
+            Log.d(TAG, "Adding MCS service after GAS...")
+            registerServices()
+            addService("MCS")
+            
+            // Add TBS after MCS with additional delay
+            handler.postDelayed({
+                Log.d(TAG, "Adding TBS service after MCS...")
+                addService("TBS")
+                Log.d(TAG, "All services addition completed")
+            }, 500) // 500ms delay between services
+        }, 300) // 300ms delay after GAS
     }
     
     private fun addGenericAccessService() {
@@ -846,14 +965,17 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
     }
     
     /**
-     * Register the Media Control Service manager
+     * Register the Media Control Service and Telephone Bearer Service managers
      * This demonstrates how to register services with the generic system
      */
-    private fun registerMediaService() {
-        // For now, MediaManager doesn't implement ServiceManager interface
-        // but we register it for future extensibility
+    private fun registerServices() {
+        // Register Media Control Service
         serviceManagers["MCS"] = mediaManager
         Log.d(TAG, "Registered Media Control Service manager")
+        
+        // Register Telephone Bearer Service
+        serviceManagers["TBS"] = callManager
+        Log.d(TAG, "Registered Telephone Bearer Service manager")
     }
     
     /**
@@ -945,6 +1067,12 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
         currentMediaMetadata = metadata
         Log.d(TAG, "Delegating media metadata update to MediaManager")
         mediaManager.updateMediaMetadata(metadata)
+    }
+    
+    fun updateCallMetadata(metadata: CallMetadata) {
+        currentCallMetadata = metadata
+        Log.d(TAG, "Delegating call metadata update to CallManager")
+        callManager.updateCallMetadata(metadata)
     }
 
     private fun notifyCharacteristic(uuid: UUID, value: String) {
@@ -1164,13 +1292,13 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
     private fun sendInitialNotifications(device: BluetoothDevice) {
         Log.d(TAG, "SENDING INITIAL NOTIFICATIONS to ${device.address}")
         
-        // Ensure this device is marked as recently connected
+        // Ensure this device is marked as recently connected for both services
         if (!recentlyConnectedDevices.contains(device)) {
             recentlyConnectedDevices.add(device)
             Log.d(TAG, "Added ${device.address} to recently connected devices")
         }
         
-        // Use current metadata if available, otherwise send default values  
+        // Send initial media state
         currentMediaMetadata?.let { metadata ->
             Log.d(TAG, "Using current media metadata for initial notifications")
             
@@ -1212,11 +1340,37 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
             notifyCharacteristicBytes(MediaManager.STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
             
         } ?: run {
-            Log.d(TAG, "Sending default initial values")
+            Log.d(TAG, "Sending default initial media values")
             // Send default values for initial connection
             notifyCharacteristic(MediaManager.MP_NAME_UUID, "MediaPlayer") 
             notifyCharacteristic(MediaManager.TITLE_UUID, "No Media")
             notifyCharacteristicBytes(MediaManager.STATE_UUID, byteArrayOf(0)) 
+        }
+        
+        // Send initial call state
+        currentCallMetadata?.let { callData ->
+            Log.d(TAG, "Using current call metadata for initial notifications")
+            callManager.sendInitialCallState(device)
+        } ?: run {
+            Log.d(TAG, "Sending default initial call values")
+            // Send default call state
+            val service = gattServer?.getService(CallManager.TBS_SERVICE_UUID)
+            service?.let {
+                val callStateChar = it.getCharacteristic(CallManager.CALL_STATE_UUID)
+                val callNameChar = it.getCharacteristic(CallManager.CALL_FRIENDLY_NAME_UUID)
+                
+                callStateChar?.let { char ->
+                    char.value = byteArrayOf(0x00) // Idle state
+                    gattServer?.notifyCharacteristicChanged(device, char, false)
+                    Log.d(TAG, "Sent initial CALL_STATE: Idle to new device")
+                }
+                
+                callNameChar?.let { char ->
+                    char.value = "No Active Call".toByteArray(Charsets.UTF_8)
+                    gattServer?.notifyCharacteristicChanged(device, char, false)
+                    Log.d(TAG, "Sent initial CALL_FRIENDLY_NAME to new device")
+                }
+            }
         }
         
         // Remove this specific device from recently connected after notifications
