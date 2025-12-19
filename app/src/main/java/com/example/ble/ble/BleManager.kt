@@ -13,17 +13,16 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.example.ble.models.BleDevice
 import com.example.ble.models.MediaMetadata
+import com.example.ble.utils.PermissionUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.*
 
 private const val TAG = "BleManager"
 
 @SuppressLint("MissingPermission")
-class BleManager(private val context: Context) {
+class BleManager(private val context: Context) : MediaManager.BleManagerInterface {
 
     // BLE Components
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -40,35 +39,33 @@ class BleManager(private val context: Context) {
     // Connected devices
     private val connectedDevices = mutableSetOf<BluetoothDevice>()
     private val subscribedDevices = mutableSetOf<BluetoothDevice>()
+    private val recentlyConnectedDevices = mutableSetOf<BluetoothDevice>()
     
     // Track characteristic subscriptions per device
     private val deviceSubscriptions = mutableMapOf<BluetoothDevice, MutableSet<UUID>>()
     
-    // Track change detection
-    private var currentMediaMetadata: MediaMetadata? = null
-    private var trackChangeCounter = 0
-    
-    // Track last sent values for change detection
+    // Value tracking
     private val lastSentValues = mutableMapOf<UUID, String>()
-    private var lastSentPositionSeconds = -1L  // Track last sent position in seconds
-    private val recentlyConnectedDevices = mutableSetOf<BluetoothDevice>()
+    private var currentMediaMetadata: MediaMetadata? = null
     
-    // Service UUIDs - Media Control Service (MCS) Bluetooth SIG Standard
-    companion object {
-        // MCS Service UUID (0x1849)
-        val MEDIA_SERVICE_UUID = UUID.fromString("00001849-0000-1000-8000-00805f9b34fb")
-        
-        // MCS Characteristics - Official Bluetooth SIG UUIDs
-        val MP_NAME_UUID = UUID.fromString("00002b93-0000-1000-8000-00805f9b34fb")          // Media Player Name (Source ID)
-        val TRACK_CHANGED_UUID = UUID.fromString("00002b96-0000-1000-8000-00805f9b34fb")    // Track Changed
-        val TITLE_UUID = UUID.fromString("00002b97-0000-1000-8000-00805f9b34fb")            // Track Title
-        val DURATION_UUID = UUID.fromString("00002b98-0000-1000-8000-00805f9b34fb")         // Track Duration
-        val POSITION_UUID = UUID.fromString("00002b99-0000-1000-8000-00805f9b34fb")         // Track Position
-        val STATE_UUID = UUID.fromString("00002ba3-0000-1000-8000-00805f9b34fb")            // Media State
-        val MCP_UUID = UUID.fromString("00002ba4-0000-1000-8000-00805f9b34fb")              // Media Control Point
-        val MCP_OPCODE_SUPPORTED_UUID = UUID.fromString("00002ba5-0000-1000-8000-00805f9b34fb") // MCP Opcodes Supported
+    // Generic service management - extensible for multiple services
+    private val serviceManagers = mutableMapOf<String, Any>()
+    private val registeredServices = mutableMapOf<String, BluetoothGattService>()
+    
+    // Service interface for extensibility
+    interface ServiceManager {
+        fun getServiceName(): String
+        fun createService(): BluetoothGattService?
+        fun handleCharacteristicWrite(characteristic: BluetoothGattCharacteristic, value: ByteArray)
+        fun handleCharacteristicRead(characteristic: BluetoothGattCharacteristic): ByteArray?
+        fun onDeviceConnected(device: BluetoothDevice)
+        fun onDeviceDisconnected(device: BluetoothDevice)
     }
-
+    
+    // Media Manager for MCS operations (implements ServiceManager concept)
+    private val mediaManager = MediaManager(this)
+    
+    
     // State flows for UI
     private val _scannedDevices = MutableStateFlow<List<BleDevice>>(emptyList())
     val scannedDevices: StateFlow<List<BleDevice>> = _scannedDevices.asStateFlow()
@@ -84,6 +81,14 @@ class BleManager(private val context: Context) {
     val scanFilter: StateFlow<String> = _scanFilter.asStateFlow()
 
     private val foundDevices = mutableMapOf<String, BleDevice>()
+
+    // MediaManager.BleManagerInterface implementation
+    override fun getGattServer(): BluetoothGattServer? = gattServer
+    override fun getConnectedDevices(): Set<BluetoothDevice> = connectedDevices.toSet()
+    override fun hasBlePermissions(): Boolean = checkBlePermissions()
+    override fun notifyCharacteristicChanged(device: BluetoothDevice, characteristic: BluetoothGattCharacteristic): Boolean {
+        return gattServer?.notifyCharacteristicChanged(device, characteristic, false) ?: false
+    }
 
     // Scan callback
     private val scanCallback = object : ScanCallback() {
@@ -181,7 +186,9 @@ class BleManager(private val context: Context) {
                     subscribedDevices.add(device)
                     deviceSubscriptions[device] = mutableSetOf()
                     connectedDevices.add(device)
-                    recentlyConnectedDevices.add(device)
+                    
+                    // Notify MediaManager of new connection
+                    mediaManager.addRecentlyConnectedDevice(device)
                     
                     Log.d(TAG, "✅ TI chip ready for subscriptions")
                     Log.d(TAG, "   Total connected GATT server devices: ${subscribedDevices.size}")
@@ -192,19 +199,19 @@ class BleManager(private val context: Context) {
                         Log.d(TAG, "📋 GATT Server Services Available:")
                         Log.d(TAG, "   Number of services: ${services.size}")
                         services.forEach { service ->
-                            val serviceName = if (service.uuid == MEDIA_SERVICE_UUID) "MCS (Media Control Service)" else service.uuid.toString()
+                            val serviceName = if (service.uuid == MediaManager.MEDIA_SERVICE_UUID) "MCS (Media Control Service)" else service.uuid.toString()
                             Log.d(TAG, "   🎵 Service: $serviceName")
                             Log.d(TAG, "      Characteristics: ${service.characteristics.size}")
                             service.characteristics.forEach { char ->
                                 val charName = when (char.uuid) {
-                                    MP_NAME_UUID -> "MP_NAME (Media Player Name)"
-                                    TRACK_CHANGED_UUID -> "TRACK_CHANGED"
-                                    TITLE_UUID -> "TITLE"
-                                    DURATION_UUID -> "DURATION"
-                                    POSITION_UUID -> "POSITION"
-                                    STATE_UUID -> "STATE"
-                                    MCP_UUID -> "MCP (Media Control Point)"
-                                    MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
+                                    MediaManager.MP_NAME_UUID -> "MP_NAME (Media Player Name)"
+                                    MediaManager.TRACK_CHANGED_UUID -> "TRACK_CHANGED"
+                                    MediaManager.TITLE_UUID -> "TITLE"
+                                    MediaManager.DURATION_UUID -> "DURATION"
+                                    MediaManager.POSITION_UUID -> "POSITION"
+                                    MediaManager.STATE_UUID -> "STATE"
+                                    MediaManager.MCP_UUID -> "MCP (Media Control Point)"
+                                    MediaManager.MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
                                     else -> char.uuid.toString()
                                 }
                                 Log.d(TAG, "         📡 $charName")
@@ -215,7 +222,7 @@ class BleManager(private val context: Context) {
                     
                     // Try to trigger service discovery by sending a characteristic notification
                     gattServer?.services?.let { services ->
-                        val mpNameChar = services.firstOrNull()?.getCharacteristic(MP_NAME_UUID)
+                        val mpNameChar = services.firstOrNull()?.getCharacteristic(MediaManager.MP_NAME_UUID)
                         if (mpNameChar != null) {
                             Log.d(TAG, "🚨 Triggering MP_NAME notification to prompt TI chip discovery...")
                             try {
@@ -241,7 +248,7 @@ class BleManager(private val context: Context) {
                             }
                             
                             // Try to update a characteristic to trigger activity
-                            gattServer?.services?.firstOrNull()?.getCharacteristic(TRACK_CHANGED_UUID)?.let { trackChangedChar ->
+                            gattServer?.services?.firstOrNull()?.getCharacteristic(MediaManager.TRACK_CHANGED_UUID)?.let { trackChangedChar ->
                                 trackChangedChar.value = byteArrayOf(0x01) // Change to indicate new track
                                 Log.d(TAG, "🔄 Updated TRACK_CHANGED to trigger TI chip interest")
                             }
@@ -267,7 +274,7 @@ class BleManager(private val context: Context) {
                     subscribedDevices.remove(device)
                     deviceSubscriptions.remove(device)
                     connectedDevices.remove(device)
-                    recentlyConnectedDevices.remove(device)
+                    this@BleManager.recentlyConnectedDevices.remove(device)
                     Log.d(TAG, "   Remaining connected GATT server devices: ${subscribedDevices.size}")
                 }
                 else -> {
@@ -285,14 +292,14 @@ class BleManager(private val context: Context) {
                 
                 // Verify all our characteristics are present
                 val expectedChars = listOf(
-                    MP_NAME_UUID to "MP_NAME",
-                    TRACK_CHANGED_UUID to "TRACK_CHANGED", 
-                    TITLE_UUID to "TITLE",
-                    DURATION_UUID to "DURATION",
-                    POSITION_UUID to "POSITION",
-                    STATE_UUID to "STATE",
-                    MCP_UUID to "MCP",
-                    MCP_OPCODE_SUPPORTED_UUID to "MCP_OPCODE_SUPPORTED"
+                    MediaManager.MP_NAME_UUID to "MP_NAME",
+                    MediaManager.TRACK_CHANGED_UUID to "TRACK_CHANGED", 
+                    MediaManager.TITLE_UUID to "TITLE",
+                    MediaManager.DURATION_UUID to "DURATION",
+                    MediaManager.POSITION_UUID to "POSITION",
+                    MediaManager.STATE_UUID to "STATE",
+                    MediaManager.MCP_UUID to "MCP",
+                    MediaManager.MCP_OPCODE_SUPPORTED_UUID to "MCP_OPCODE_SUPPORTED"
                 )
                 
                 expectedChars.forEach { (uuid, name) ->
@@ -300,13 +307,13 @@ class BleManager(private val context: Context) {
                     if (char != null) {
                         // Initialize characteristics with proper default values
                         when (uuid) {
-                            MP_NAME_UUID -> char.value = "MediaPlayer".toByteArray(Charsets.UTF_8) // String
-                            TITLE_UUID -> char.value = "No Media".toByteArray(Charsets.UTF_8)
-                            STATE_UUID -> char.value = byteArrayOf(0) // Numeric: 0=Inactive
-                            TRACK_CHANGED_UUID -> char.value = byteArrayOf(0x00)
-                            DURATION_UUID -> char.value = ByteArray(4) { 0 }
-                            POSITION_UUID -> char.value = ByteArray(4) { 0 }
-                            MCP_OPCODE_SUPPORTED_UUID -> char.value = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
+                            MediaManager.MP_NAME_UUID -> char.value = "MediaPlayer".toByteArray(Charsets.UTF_8) // String
+                            MediaManager.TITLE_UUID -> char.value = "No Media".toByteArray(Charsets.UTF_8)
+                            MediaManager.STATE_UUID -> char.value = byteArrayOf(0) // Numeric: 0=Inactive
+                            MediaManager.TRACK_CHANGED_UUID -> char.value = byteArrayOf(0x00)
+                            MediaManager.DURATION_UUID -> char.value = ByteArray(4) { 0 }
+                            MediaManager.POSITION_UUID -> char.value = ByteArray(4) { 0 }
+                            MediaManager.MCP_OPCODE_SUPPORTED_UUID -> char.value = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
                         }
                         Log.d(TAG, "   ✅ $name characteristic ready with value: ${char.value?.contentToString() ?: "null"}")
                     } else {
@@ -384,14 +391,14 @@ class BleManager(private val context: Context) {
             if (!hasBlePermissions()) return
             
             val charName = when (characteristic.uuid) {
-                MP_NAME_UUID -> "MP_NAME (Media Player Name)"
-                TRACK_CHANGED_UUID -> "TRACK_CHANGED"
-                TITLE_UUID -> "TITLE"
-                DURATION_UUID -> "DURATION"
-                POSITION_UUID -> "POSITION"
-                STATE_UUID -> "STATE"
-                MCP_UUID -> "MCP (Media Control Point)"
-                MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
+                MediaManager.MP_NAME_UUID -> "MP_NAME (Media Player Name)"
+                MediaManager.TRACK_CHANGED_UUID -> "TRACK_CHANGED"
+                MediaManager.TITLE_UUID -> "TITLE"
+                MediaManager.DURATION_UUID -> "DURATION"
+                MediaManager.POSITION_UUID -> "POSITION"
+                MediaManager.STATE_UUID -> "STATE"
+                MediaManager.MCP_UUID -> "MCP (Media Control Point)"
+                MediaManager.MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
                 else -> characteristic.uuid.toString()
             }
             
@@ -426,14 +433,14 @@ class BleManager(private val context: Context) {
             Log.d(TAG, "🔥 *** TI CHIP WRITE REQUEST RECEIVED! ***")
             
             val charName = when (characteristic.uuid) {
-                MP_NAME_UUID -> "MP_NAME (Media Player Name)"
-                TRACK_CHANGED_UUID -> "TRACK_CHANGED"
-                TITLE_UUID -> "TITLE"
-                DURATION_UUID -> "DURATION"
-                POSITION_UUID -> "POSITION"
-                STATE_UUID -> "STATE"
-                MCP_UUID -> "MCP (Media Control Point)"
-                MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
+                MediaManager.MP_NAME_UUID -> "MP_NAME (Media Player Name)"
+                MediaManager.TRACK_CHANGED_UUID -> "TRACK_CHANGED"
+                MediaManager.TITLE_UUID -> "TITLE"
+                MediaManager.DURATION_UUID -> "DURATION"
+                MediaManager.POSITION_UUID -> "POSITION"
+                MediaManager.STATE_UUID -> "STATE"
+                MediaManager.MCP_UUID -> "MCP (Media Control Point)"
+                MediaManager.MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
                 else -> characteristic.uuid.toString()
             }
             
@@ -464,7 +471,7 @@ class BleManager(private val context: Context) {
                 
                 // Process the write based on characteristic
                 when (characteristic.uuid) {
-                    MCP_UUID -> {
+                    MediaManager.MCP_UUID -> {
                         Log.d(TAG, "🎮 MEDIA CONTROL POINT COMMAND RECEIVED!")
                         if (value.isNotEmpty()) {
                             // Enhanced debugging: log full byte array
@@ -664,6 +671,123 @@ class BleManager(private val context: Context) {
         _connectionState.value = "Disconnected"
         updateDeviceConnectionStates()
     }
+    
+    // ==================== GENERIC SERVICE MANAGEMENT ====================
+    
+    /**
+     * Register a service manager for a specific service type
+     * @param serviceType Unique identifier for the service (e.g., "MCS", "HRS", "DIS")
+     * @param manager The service manager implementing service-specific logic
+     */
+    fun registerService(serviceType: String, manager: ServiceManager) {
+        serviceManagers[serviceType] = manager
+        Log.d(TAG, "📋 Registered service manager for: $serviceType")
+    }
+    
+    /**
+     * Add a service to the GATT server through its manager
+     * @param serviceType The type of service to add
+     */
+    fun addService(serviceType: String): Boolean {
+        // Handle MCS specifically since MediaManager doesn't implement ServiceManager yet
+        if (serviceType == "MCS") {
+            return addMediaControlServiceInternal()
+        }
+        
+        val manager = serviceManagers[serviceType] as? ServiceManager
+        if (manager == null) {
+            Log.e(TAG, "❌ No manager registered for service type: $serviceType")
+            return false
+        }
+        
+        val service = manager.createService()
+        if (service == null) {
+            Log.e(TAG, "❌ Failed to create service for type: $serviceType")
+            return false
+        }
+        
+        val success = gattServer?.addService(service) ?: false
+        if (success) {
+            registeredServices[serviceType] = service
+            Log.d(TAG, "✅ Added service: $serviceType (${manager.getServiceName()})")
+        } else {
+            Log.e(TAG, "❌ Failed to add service to GATT server: $serviceType")
+        }
+        
+        return success
+    }
+    
+    /**
+     * Legacy method that directly adds MCS - used by addService("MCS")
+     */
+    private fun addMediaControlServiceInternal(): Boolean {
+        Log.d(TAG, "🎵 Adding Media Control Service through MediaManager")
+        val service = mediaManager.createMediaControlService()
+        
+        Log.d(TAG, "📝 Adding MCS service to GATT server...")
+        val serviceAdded = gattServer?.addService(service) ?: false
+        Log.d(TAG, "🎯 GATT service addition result: $serviceAdded")
+        
+        if (serviceAdded) {
+            registeredServices["MCS"] = service
+        }
+        
+        return serviceAdded
+    }
+    
+    /**
+     * Remove a service from the GATT server
+     * @param serviceType The type of service to remove
+     */
+    fun removeService(serviceType: String): Boolean {
+        val service = registeredServices[serviceType]
+        if (service == null) {
+            Log.w(TAG, "⚠️ Service not found for removal: $serviceType")
+            return false
+        }
+        
+        val success = gattServer?.removeService(service) ?: false
+        if (success) {
+            registeredServices.remove(serviceType)
+            Log.d(TAG, "🗑️ Removed service: $serviceType")
+        } else {
+            Log.e(TAG, "❌ Failed to remove service: $serviceType")
+        }
+        
+        return success
+    }
+    
+    /**
+     * Get list of registered service types
+     */
+    fun getRegisteredServices(): Set<String> = registeredServices.keys
+    
+    /**
+     * Generic method to notify all connected devices of a characteristic change
+     * Can be used by any service manager
+     */
+    fun notifyAllDevices(serviceUuid: UUID, characteristicUuid: UUID, value: ByteArray): Boolean {
+        val service = gattServer?.getService(serviceUuid)
+        val characteristic = service?.getCharacteristic(characteristicUuid)
+        
+        if (service == null || characteristic == null) {
+            Log.e(TAG, "❌ Service or characteristic not found for notification")
+            return false
+        }
+        
+        characteristic.value = value
+        var allSuccess = true
+        
+        connectedDevices.forEach { device ->
+            val success = gattServer?.notifyCharacteristicChanged(device, characteristic, false) ?: false
+            if (!success) allSuccess = false
+            Log.d(TAG, "📡 Notify ${characteristicUuid} to ${device.address} → $success")
+        }
+        
+        return allSuccess
+    }
+    
+    // ==================== GATT SERVER MANAGEMENT ====================
 
     private fun startGattServer() {
         if (gattServer != null) {
@@ -686,13 +810,66 @@ class BleManager(private val context: Context) {
         // Add required Generic Access Service first (mandatory for MCS compliance)
         addGenericAccessService()
         
-        // Add the main Media Control Service
-        addMediaControlService()
+        // Register and add the Media Control Service using generic service management
+        registerMediaService()
+        addService("MCS")
         
         Log.d(TAG, "✅ All services queued for addition")
     }
     
     private fun addGenericAccessService() {
+        val gasService = BluetoothGattService(
+            UUID.fromString("00001800-0000-1000-8000-00805f9b34fb"), // Generic Access Service
+            BluetoothGattService.SERVICE_TYPE_PRIMARY
+        )
+        
+        // Device Name characteristic
+        val deviceNameChar = BluetoothGattCharacteristic(
+            UUID.fromString("00002a00-0000-1000-8000-00805f9b34fb"),
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        deviceNameChar.value = "Android BLE Device".toByteArray()
+        gasService.addCharacteristic(deviceNameChar)
+        
+        // Appearance characteristic  
+        val appearanceChar = BluetoothGattCharacteristic(
+            UUID.fromString("00002a01-0000-1000-8000-00805f9b34fb"),
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        appearanceChar.value = byteArrayOf(0x00, 0x00) // Generic category
+        gasService.addCharacteristic(appearanceChar)
+        
+        Log.d(TAG, "📝 Adding Generic Access Service...")
+        gattServer?.addService(gasService)
+    }
+    
+    /**
+     * Register the Media Control Service manager
+     * This demonstrates how to register services with the generic system
+     */
+    private fun registerMediaService() {
+        // For now, MediaManager doesn't implement ServiceManager interface
+        // but we register it for future extensibility
+        serviceManagers["MCS"] = mediaManager
+        Log.d(TAG, "📋 Registered Media Control Service manager")
+    }
+    
+    /**
+     * Legacy method that directly adds MCS - kept for compatibility
+     */
+    private fun addMediaControlService() {
+        Log.d(TAG, "🎵 Adding Media Control Service through MediaManager")
+        val service = mediaManager.createMediaControlService()
+        
+        Log.d(TAG, "📝 Adding MCS service to GATT server...")
+        val serviceAdded = gattServer?.addService(service) ?: false
+        Log.d(TAG, "🎯 GATT service addition result: $serviceAdded")
+        
+        if (serviceAdded) {
+            registeredServices["MCS"] = service
+        }
         val gasService = BluetoothGattService(
             UUID.fromString("00001800-0000-1000-8000-00805f9b34fb"), // Generic Access Service
             BluetoothGattService.SERVICE_TYPE_PRIMARY
@@ -718,57 +895,6 @@ class BleManager(private val context: Context) {
         
         Log.d(TAG, "📝 Adding Generic Access Service...")
         gattServer?.addService(gasService)
-    }
-    
-    private fun addMediaControlService() {
-        val service = BluetoothGattService(
-            MEDIA_SERVICE_UUID,
-            BluetoothGattService.SERVICE_TYPE_PRIMARY
-        )
-
-        // Create characteristics for Media Control Service (MCS) Standard with default values
-        val mpNameChar = createNotifyCharacteristic(MP_NAME_UUID)
-        mpNameChar.value = "MediaPlayer".toByteArray(Charsets.UTF_8) // String format
-        service.addCharacteristic(mpNameChar)
-
-        val trackChangedChar = createNotifyCharacteristic(TRACK_CHANGED_UUID)
-        trackChangedChar.value = byteArrayOf(0x00)
-        service.addCharacteristic(trackChangedChar)
-        
-        val titleChar = createNotifyCharacteristic(TITLE_UUID)
-        titleChar.value = "No Media".toByteArray(Charsets.UTF_8)
-        service.addCharacteristic(titleChar)
-        
-        val durationChar = createNotifyCharacteristic(DURATION_UUID)
-        durationChar.value = ByteArray(4) { 0 }
-        service.addCharacteristic(durationChar)
-        
-        val positionChar = createNotifyCharacteristic(POSITION_UUID)
-        positionChar.value = ByteArray(4) { 0 }
-        service.addCharacteristic(positionChar)
-        
-        val stateChar = createNotifyCharacteristic(STATE_UUID)
-        stateChar.value = byteArrayOf(0x00) // Media State: 0x00 = Inactive, 0x01 = Playing, 0x02 = Paused
-        service.addCharacteristic(stateChar)
-        
-        val mcpChar = createWriteCharacteristic(MCP_UUID)
-        service.addCharacteristic(mcpChar)
-        
-        val mcpOpcodeSupportedChar = createNotifyCharacteristic(MCP_OPCODE_SUPPORTED_UUID)
-        mcpOpcodeSupportedChar.value = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
-        service.addCharacteristic(mcpOpcodeSupportedChar)
-
-        Log.d(TAG, "📝 Adding MCS service to GATT server...")
-        val serviceAdded = gattServer?.addService(service) ?: false
-        Log.d(TAG, "🎯 GATT service addition result: $serviceAdded")
-        
-        if (!serviceAdded) {
-            Log.e(TAG, "❌ CRITICAL: Failed to add MCS service to GATT server!")
-            return
-        }
-        
-        Log.d(TAG, "✅ MCS service successfully queued for addition")
-        Log.d(TAG, "⏳ Waiting for onServiceAdded callback to confirm...")
     }
 
     private fun createNotifyCharacteristic(uuid: UUID): BluetoothGattCharacteristic {
@@ -816,100 +942,13 @@ class BleManager(private val context: Context) {
     }
 
     fun updateMediaMetadata(metadata: MediaMetadata) {
-        if (!hasBlePermissions()) return
-        
-        // Check if this is a new track (reset position tracking)
-        if (currentMediaMetadata?.title != metadata.title) {
-            Log.d(TAG, "🆕 New track detected in BLE layer, resetting position tracking")
-            lastSentPositionSeconds = -1L
-        }
-        
-        // Store current metadata for new connections
         currentMediaMetadata = metadata
-        
-        // Increment track change counter when track title changes
-        val lastTitle = lastSentValues[TITLE_UUID]
-        if (metadata.title != null && lastTitle != metadata.title) {
-            trackChangeCounter++
-            Log.d(TAG, "🎵 Track changed! Counter: $trackChangeCounter")
-        }
-        
-        // MCS Standard Characteristics
-        metadata.title?.let { 
-            Log.d(TAG, "🎵 Sending TITLE: '$it'")
-            notifyCharacteristic(TITLE_UUID, it) 
-        }
-        
-        // Send track changed notification
-        notifyCharacteristicBytes(TRACK_CHANGED_UUID, byteArrayOf(trackChangeCounter.toByte()))
-        
-        // Add duration and position if available
-        metadata.duration?.let { duration ->
-            // Encode duration according to MCS spec: 4 bytes representing centiseconds (0.01s resolution)
-            val durationCentiseconds = (duration / 10).toInt() // Convert ms to centiseconds
-            val durationBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(durationCentiseconds).array()
-            notifyCharacteristicBytes(DURATION_UUID, durationBytes)
-        }
-        
-        metadata.position?.let { position ->
-            val positionSeconds = position / 1000L
-            
-            // Temporarily send all position updates for debugging
-            Log.d(TAG, "🔍 DEBUG: Position=${position}ms (${positionSeconds}s), LastSent=${lastSentPositionSeconds}s")
-            
-            // Encode position according to MCS spec: 4 bytes representing centiseconds (0.01s resolution)
-            val positionCentiseconds = (position / 10).toInt() // Convert ms to centiseconds
-            val positionBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(positionCentiseconds).array()
-            
-            Log.d(TAG, "🕐 Sending POSITION: ${position}ms (${positionSeconds}s) = ${positionCentiseconds} centiseconds to BLE devices")
-            notifyCharacteristicBytes(POSITION_UUID, positionBytes)
-            lastSentPositionSeconds = positionSeconds
-        }
-        
-        // Use MP_NAME for source identification (send as string)
-        metadata.packageName?.let { packageName ->
-            val appName = when {
-                packageName.contains("spotify", ignoreCase = true) -> "Spotify"
-                packageName.contains("youtube", ignoreCase = true) -> "YouTube Music"
-                packageName.contains("music", ignoreCase = true) -> when {
-                    packageName.contains("google") -> "YouTube Music"
-                    packageName.contains("apple") -> "Apple Music"
-                    else -> "Music"
-                }
-                packageName.contains("soundcloud", ignoreCase = true) -> "SoundCloud"
-                packageName.contains("pandora", ignoreCase = true) -> "Pandora"
-                packageName.contains("deezer", ignoreCase = true) -> "Deezer"
-                else -> packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() }
-            }
-            Log.d(TAG, "🎵 Sending MP_NAME (String): '$appName' for $packageName")
-            notifyCharacteristic(MP_NAME_UUID, appName)
-        }
-        
-        // MCS Media State (using proper byte values)
-        val mcsStateCode = when {
-            metadata.isPlaying -> 1 // Playing
-            metadata.title != null -> 2 // Paused 
-            else -> 0 // Inactive
-        }
-        val mcsStateName = when (mcsStateCode) {
-            1 -> "Playing"
-            2 -> "Paused"
-            else -> "Inactive"
-        }
-        Log.d(TAG, "🎵 Sending STATE: $mcsStateName (code: $mcsStateCode, byte: ${mcsStateCode.toByte()})")
-        notifyCharacteristicBytes(STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
-        
-        // Clear recently connected devices after sending initial notifications
-        if (recentlyConnectedDevices.isNotEmpty()) {
-            Log.d(TAG, "🧹 Clearing recently connected devices list (${recentlyConnectedDevices.size} devices)")
-            recentlyConnectedDevices.clear()
-        }
-        
-        Log.d(TAG, "Updated MCS metadata: ${metadata.title} from ${metadata.packageName} - $mcsStateName")
+        Log.d(TAG, "🔄 Delegating media metadata update to MediaManager")
+        mediaManager.updateMediaMetadata(metadata)
     }
 
     private fun notifyCharacteristic(uuid: UUID, value: String) {
-        val service = gattServer?.getService(MEDIA_SERVICE_UUID) ?: return
+        val service = gattServer?.getService(MediaManager.MEDIA_SERVICE_UUID) ?: return
         val characteristic = service.getCharacteristic(uuid) ?: return
 
         // Check if value actually changed
@@ -959,16 +998,16 @@ class BleManager(private val context: Context) {
     }
 
     private fun notifyCharacteristicBytes(uuid: UUID, value: ByteArray) {
-        val service = gattServer?.getService(MEDIA_SERVICE_UUID) ?: return
+        val service = gattServer?.getService(MediaManager.MEDIA_SERVICE_UUID) ?: return
         val characteristic = service.getCharacteristic(uuid) ?: return
 
         // Debug logging for byte values
         val charName = when (uuid) {
-            STATE_UUID -> "STATE"
-            TRACK_CHANGED_UUID -> "TRACK_CHANGED"
-            DURATION_UUID -> "DURATION"
-            POSITION_UUID -> "POSITION"
-            MP_NAME_UUID -> "MP_NAME"
+            MediaManager.STATE_UUID -> "STATE"
+            MediaManager.TRACK_CHANGED_UUID -> "TRACK_CHANGED"
+            MediaManager.DURATION_UUID -> "DURATION"
+            MediaManager.POSITION_UUID -> "POSITION"
+            MediaManager.MP_NAME_UUID -> "MP_NAME"
             else -> uuid.toString()
         }
         
@@ -1034,13 +1073,8 @@ class BleManager(private val context: Context) {
         _scannedDevices.value = updatedDevices.sortedByDescending { it.rssi }
     }
 
-    fun hasBlePermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        }
+    private fun checkBlePermissions(): Boolean {
+        return PermissionUtils.hasBlePermissions(context)
     }
 
     fun isBluetoothEnabled(): Boolean = bluetoothAdapter.isEnabled
@@ -1156,12 +1190,12 @@ class BleManager(private val context: Context) {
                     else -> packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() }
                 }
                 Log.d(TAG, "🆕 Force sending MP_NAME: '$appName' to new device")
-                notifyCharacteristic(MP_NAME_UUID, appName)
+                notifyCharacteristic(MediaManager.MP_NAME_UUID, appName)
             }
             
             metadata.title?.let { 
                 Log.d(TAG, "🆕 Force sending TITLE: '$it' to new device")
-                notifyCharacteristic(TITLE_UUID, it)
+                notifyCharacteristic(MediaManager.TITLE_UUID, it)
             }
             
             val mcsStateCode = when {
@@ -1175,14 +1209,14 @@ class BleManager(private val context: Context) {
                 else -> "Inactive"
             }
             Log.d(TAG, "🆕 Force sending STATE: $mcsStateName to new device")
-            notifyCharacteristicBytes(STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
+            notifyCharacteristicBytes(MediaManager.STATE_UUID, byteArrayOf(mcsStateCode.toByte()))
             
         } ?: run {
             Log.d(TAG, "📱 Sending default initial values")
             // Send default values for initial connection
-            notifyCharacteristic(MP_NAME_UUID, "MediaPlayer") 
-            notifyCharacteristic(TITLE_UUID, "No Media")
-            notifyCharacteristicBytes(STATE_UUID, byteArrayOf(0)) 
+            notifyCharacteristic(MediaManager.MP_NAME_UUID, "MediaPlayer") 
+            notifyCharacteristic(MediaManager.TITLE_UUID, "No Media")
+            notifyCharacteristicBytes(MediaManager.STATE_UUID, byteArrayOf(0)) 
         }
         
         // Remove this specific device from recently connected after notifications
@@ -1212,20 +1246,20 @@ class BleManager(private val context: Context) {
                         
                         // Try to make service more attractive by updating values
                         gattServer?.services?.firstOrNull()?.let { service ->
-                            service.getCharacteristic(MP_NAME_UUID)?.let { char ->
+                            service.getCharacteristic(MediaManager.MP_NAME_UUID)?.let { char ->
                                 val newValue = "MediaPlayer_${checkCount}".toByteArray(Charsets.UTF_8)
                                 char.value = newValue
                                 Log.d(TAG, "🔄 Updated MP_NAME to: ${String(newValue, Charsets.UTF_8)}")
                             }
                             
                             // Also update other characteristics to make them more "active"
-                            service.getCharacteristic(TITLE_UUID)?.let { char ->
+                            service.getCharacteristic(MediaManager.TITLE_UUID)?.let { char ->
                                 val newValue = "Track $checkCount".toByteArray(Charsets.UTF_8)
                                 char.value = newValue
                                 Log.d(TAG, "🔄 Updated TITLE to: ${String(newValue, Charsets.UTF_8)}")
                             }
                             
-                            service.getCharacteristic(STATE_UUID)?.let { char ->
+                            service.getCharacteristic(MediaManager.STATE_UUID)?.let { char ->
                                 val stateValues = byteArrayOf(0x00, 0x01, 0x02) // Inactive, Playing, Paused
                                 val stateNames = listOf("Inactive", "Playing", "Paused")
                                 val stateIndex = checkCount % 3
@@ -1233,7 +1267,7 @@ class BleManager(private val context: Context) {
                                 Log.d(TAG, "🔄 Updated STATE to: ${stateNames[stateIndex]} (0x${"%02x".format(stateValues[stateIndex])})")
                             }
                             
-                            service.getCharacteristic(TRACK_CHANGED_UUID)?.let { char ->
+                            service.getCharacteristic(MediaManager.TRACK_CHANGED_UUID)?.let { char ->
                                 char.value = byteArrayOf(checkCount.toByte())
                                 Log.d(TAG, "🔄 Updated TRACK_CHANGED to: $checkCount")
                             }
