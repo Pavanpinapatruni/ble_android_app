@@ -44,7 +44,7 @@ class CallManager(private val bleManager: MediaManager.BleManagerInterface) {
         
         // Create all TBS characteristics
         val callStateChar = createNotifyCharacteristic(CALL_STATE_UUID)
-        callStateChar.value = byteArrayOf(0x00) // No active calls
+        callStateChar.value = byteArrayOf(0x00, 0x00, 0x00) // No active calls (3-byte structure)
         service.addCharacteristic(callStateChar)
         
         // Call Control Point - Write & Notify
@@ -101,44 +101,19 @@ class CallManager(private val bleManager: MediaManager.BleManagerInterface) {
      * Updates call metadata and sends notifications to connected devices
      */
     fun updateCallMetadata(metadata: CallMetadata) {
+        Log.d(TAG, "=== UPDATE CALL METADATA ===")
+        Log.d(TAG, "New metadata: state=${metadata.state.name}, caller='${metadata.callerName}', number='${metadata.phoneNumber}'")
+        Log.d(TAG, "Current metadata: ${currentCallMetadata?.let { "state=${it.state.name}, caller='${it.callerName}'" } ?: "null"}")
+        
         if (!bleManager.hasBlePermissions()) {
-            Log.w(TAG, "No BLE permissions - cannot send call notifications")
+            Log.w(TAG, "No BLE permissions - skipping call metadata update")
             return
         }
-        
-        Log.d(TAG, "*** CALL MANAGER RECEIVED UPDATE ***")
-        Log.d(TAG, "State: ${metadata.state.name}")
-        Log.d(TAG, "Caller: ${metadata.getDisplayName()}")
-        Log.d(TAG, "Connected devices: ${bleManager.getConnectedDevices().size}")
         
         // Store current metadata for new connections
         currentCallMetadata = metadata
         
-        // Send call state based on current call status
-        val callStateValue = when (metadata.state) {
-            CallMetadata.CallState.INCOMING -> 0x01
-            CallMetadata.CallState.DIALING -> 0x02
-            CallMetadata.CallState.ALERTING -> 0x03
-            CallMetadata.CallState.ACTIVE -> 0x04
-            CallMetadata.CallState.LOCALLY_HELD -> 0x05
-            CallMetadata.CallState.REMOTELY_HELD -> 0x06
-            CallMetadata.CallState.LOCALLY_AND_REMOTELY_HELD -> 0x07
-            CallMetadata.CallState.IDLE -> 0x00
-        }
-        
-        Log.d(TAG, "Sending CALL_STATE: ${metadata.state.name} (code: 0x${"%02x".format(callStateValue)})")
-        notifyCharacteristicBytes(CALL_STATE_UUID, byteArrayOf(callStateValue.toByte()))
-        
-        // Send caller name/number
-        metadata.callerName?.let { name ->
-            Log.d(TAG, "Sending CALL_FRIENDLY_NAME: '$name'")
-            notifyCharacteristic(CALL_FRIENDLY_NAME_UUID, name)
-        } ?: metadata.phoneNumber?.let { number ->
-            Log.d(TAG, "Sending CALL_FRIENDLY_NAME: '$number'")
-            notifyCharacteristic(CALL_FRIENDLY_NAME_UUID, number)
-        }
-        
-        // Send termination reason if call ended
+        // Handle call termination first (before sending state)
         if (metadata.state == CallMetadata.CallState.IDLE && metadata.terminationReason != null) {
             val terminationValue = when (metadata.terminationReason) {
                 CallMetadata.TerminationReason.LOCAL_PARTY -> 0x01
@@ -148,10 +123,116 @@ class CallManager(private val bleManager: MediaManager.BleManagerInterface) {
                 CallMetadata.TerminationReason.NO_ANSWER -> 0x05
                 CallMetadata.TerminationReason.UNKNOWN -> 0x00
             }
-            Log.d(TAG, "Sending TERMINATION_REASON: ${metadata.terminationReason.name} (code: 0x${"%02x".format(terminationValue)})")
-            notifyCharacteristicBytes(TERMINATION_REASON_UUID, byteArrayOf(terminationValue.toByte()))
+            // Termination Reason characteristic: [Call Index, Termination Reason]
+            val callIndex = 0x01 // Use same call index as other states
+            val terminationBytes = byteArrayOf(callIndex.toByte(), terminationValue.toByte())
+            Log.d(TAG, "Sending TERMINATION_REASON: ${metadata.terminationReason.name} (index: 0x${"%%02x".format(callIndex)}, reason: 0x${"%%02x".format(terminationValue)})")
+            notifyCharacteristicBytes(TERMINATION_REASON_UUID, terminationBytes)
+        }
+
+        // Send call state based on current call status - TBS specification values
+        val callStateValue = when (metadata.state) {
+            CallMetadata.CallState.INCOMING -> 0x00
+            CallMetadata.CallState.DIALING -> 0x01
+            CallMetadata.CallState.ALERTING -> 0x02
+            CallMetadata.CallState.ACTIVE -> 0x03
+            CallMetadata.CallState.LOCALLY_HELD -> 0x04
+            CallMetadata.CallState.REMOTELY_HELD -> 0x05
+            CallMetadata.CallState.LOCALLY_AND_REMOTELY_HELD -> 0x06
+            CallMetadata.CallState.IDLE -> {
+                // For IDLE state, don't send call state notification
+                // But DO send the friendly name from termination metadata before clearing
+                
+                // Send the caller name from termination metadata (if available)
+                metadata.callerName?.let { name ->
+                    Log.d(TAG, "Sending final CALL_FRIENDLY_NAME during termination: '$name'")
+                    notifyCharacteristic(CALL_FRIENDLY_NAME_UUID, name)
+                } ?: metadata.phoneNumber?.let { number ->
+                    Log.d(TAG, "Sending final CALL_FRIENDLY_NAME during termination: '$number'")
+                    notifyCharacteristic(CALL_FRIENDLY_NAME_UUID, number)
+                } ?: run {
+                    // Only clear if no caller info available
+                    Log.d(TAG, "No caller info available - clearing CALL_FRIENDLY_NAME")
+                    notifyCharacteristic(CALL_FRIENDLY_NAME_UUID, "")
+                }
+                
+                // Clear recently connected devices after sending termination
+                if (recentlyConnectedDevices.isNotEmpty()) {
+                    Log.d(TAG, "Clearing recently connected devices list (${recentlyConnectedDevices.size} devices)")
+                    recentlyConnectedDevices.clear()
+                }
+                
+                Log.d(TAG, "Updated TBS metadata: Call ended - IDLE")
+                return // Don't send call state notification for IDLE
+            }
         }
         
+        // Create complete TBS Call State structure (3 bytes):
+        // Byte 0: Call Index (0x01 for first call)
+        // Byte 1: Call State value
+        // Byte 2: Call Flags (0x00 for basic calls)
+        val callIndex = 0x01
+        val callFlags = 0x00
+        val callStateBytes = byteArrayOf(
+            callIndex.toByte(),
+            callStateValue.toByte(),
+            callFlags.toByte()
+        )
+        
+        Log.d(TAG, "Sending CALL_STATE: ${metadata.state.name} (index: 0x${"%02x".format(callIndex)}, state: 0x${"%02x".format(callStateValue)}, flags: 0x${"%02x".format(callFlags)})")
+        notifyCharacteristicBytes(CALL_STATE_UUID, callStateBytes)
+        
+        // Send caller name for active calls
+        metadata.callerName?.let { name ->
+            Log.d(TAG, "Sending CALL_FRIENDLY_NAME: '$name'")
+            Log.d(TAG, "Connected devices count: ${bleManager.getConnectedDevices().size}")
+            Log.d(TAG, "Recently connected devices count: ${recentlyConnectedDevices.size}")
+            
+            // Force send friendly name on state changes to ensure it's delivered
+            val gattServer = bleManager.getGattServer()
+            val service = gattServer?.getService(TBS_SERVICE_UUID)
+            val characteristic = service?.getCharacteristic(CALL_FRIENDLY_NAME_UUID)
+            
+            if (characteristic != null) {
+                Log.d(TAG, "Forcing CALL_FRIENDLY_NAME notification (bypassing change detection)")
+                characteristic.value = name.toByteArray(Charsets.UTF_8)
+                
+                bleManager.getConnectedDevices().forEach { device ->
+                    val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
+                    Log.d(TAG, "Force notify CALL_FRIENDLY_NAME to ${device.address} → $ok")
+                }
+                
+                // Update last sent value
+                lastSentValues[CALL_FRIENDLY_NAME_UUID] = name
+            } else {
+                Log.w(TAG, "CALL_FRIENDLY_NAME characteristic not found for forced notification")
+            }
+        } ?: metadata.phoneNumber?.let { number ->
+            Log.d(TAG, "Sending CALL_FRIENDLY_NAME: '$number'")
+            Log.d(TAG, "Connected devices count: ${bleManager.getConnectedDevices().size}")
+            Log.d(TAG, "Recently connected devices count: ${recentlyConnectedDevices.size}")
+            
+            // Force send friendly name on state changes to ensure it's delivered
+            val gattServer = bleManager.getGattServer()
+            val service = gattServer?.getService(TBS_SERVICE_UUID)
+            val characteristic = service?.getCharacteristic(CALL_FRIENDLY_NAME_UUID)
+            
+            if (characteristic != null) {
+                Log.d(TAG, "Forcing CALL_FRIENDLY_NAME notification (bypassing change detection)")
+                characteristic.value = number.toByteArray(Charsets.UTF_8)
+                
+                bleManager.getConnectedDevices().forEach { device ->
+                    val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
+                    Log.d(TAG, "Force notify CALL_FRIENDLY_NAME to ${device.address} → $ok")
+                }
+                
+                // Update last sent value
+                lastSentValues[CALL_FRIENDLY_NAME_UUID] = number
+            } else {
+                Log.w(TAG, "CALL_FRIENDLY_NAME characteristic not found for forced notification")
+            }
+        }
+
         // Clear recently connected devices after sending initial notifications
         if (recentlyConnectedDevices.isNotEmpty()) {
             Log.d(TAG, "Clearing recently connected devices list (${recentlyConnectedDevices.size} devices)")
@@ -187,6 +268,8 @@ class CallManager(private val bleManager: MediaManager.BleManagerInterface) {
 
         // Send notifications to devices
         val connectedDevices = bleManager.getConnectedDevices()
+        Log.d(TAG, "Total connected devices for notification: ${connectedDevices.size}")
+        
         if (shouldSendToAllDevices) {
             // Send to all connected devices on value change
             Log.d(TAG, "Value changed for $uuid: '$lastValue' → '$value'")

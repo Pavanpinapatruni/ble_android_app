@@ -15,10 +15,16 @@ import com.example.ble.receivers.PhoneStateReceiver
 import com.example.ble.ui.screens.MainScreen
 import com.example.ble.ui.theme.BleTheme
 import com.example.ble.viewmodels.MainViewModel
+import com.example.ble.utils.NotificationListenerUtils
+import android.util.Log
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var phoneStateReceiver: PhoneStateReceiver
+    
+    companion object {
+        private const val TAG = "MainActivity"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,6 +34,9 @@ class MainActivity : ComponentActivity() {
         phoneStateReceiver = PhoneStateReceiver()
         val intentFilter = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
         registerReceiver(phoneStateReceiver, intentFilter)
+        
+        // Check notification listener permission for caller ID
+        checkNotificationListenerPermission()
 
         setContent {
             BleTheme {
@@ -47,6 +56,19 @@ class MainActivity : ComponentActivity() {
             unregisterReceiver(phoneStateReceiver)
         } catch (e: Exception) {
             // Receiver might not be registered
+        }
+    }
+    
+    private fun checkNotificationListenerPermission() {
+        if (!NotificationListenerUtils.hasNotificationListenerPermission(this)) {
+            Log.i(TAG, "Notification listener permission not granted")
+            Log.i(TAG, "Caller ID will not work until permission is granted")
+            Log.i(TAG, "To grant permission: ${NotificationListenerUtils.getPermissionExplanation()}")
+            
+            // For now, just log. In a real app, you might show a dialog or prompt
+            // NotificationListenerUtils.requestNotificationListenerPermission(this)
+        } else {
+            Log.i(TAG, "Notification listener permission is granted - caller ID will work")
         }
     }
 }

@@ -48,7 +48,7 @@ data class CallMetadata(
         fun createIdleState(): CallMetadata {
             return CallMetadata(
                 state = CallState.IDLE,
-                callerName = "No Active Call"
+                callerName = null  // No caller name for idle state
             )
         }
         

@@ -13,10 +13,7 @@ import android.util.Log
 import android.os.Build
 import androidx.annotation.RequiresApi
 import com.example.ble.models.CallMetadata
-import com.example.ble.models.PhoneCallInfo
-import com.example.ble.models.PhoneCallState
 import com.example.ble.ble.BleManager
-import com.example.ble.receivers.PhoneStateReceiver
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
@@ -24,6 +21,13 @@ private const val TAG = "CallListenerService"
 
 /**
  * Service to monitor phone calls and notify BLE clients via TBS
+ * 
+ * This service uses two approaches for complete call monitoring:
+ * 1. TelephonyManager/PhoneStateListener - for call state timing (ringing, active, idle)
+ * 2. CallNotificationListener - for caller name/ID (works with Android 9+ privacy restrictions)
+ * 
+ * The notification listener approach is the standard method used by smartwatches
+ * and companion apps to get caller information without requiring Default Dialer status.
  */
 class CallListenerService : Service() {
     
@@ -146,29 +150,138 @@ class CallListenerService : Service() {
         }
         
         /**
-         * Test method to manually trigger call state for debugging
+         * Update caller name from notification listener (main solution for caller ID)
          */
-        fun testCallNotification(testState: String) {
+        fun updateCallerNameFromNotification(name: String) {
             val instance = instance ?: return
             
-            Log.d(TAG, "*** MANUAL CALL TEST TRIGGERED: $testState ***")
-            
-            val testMetadata = when (testState.uppercase()) {
-                "INCOMING" -> CallMetadata.createIncomingCall(
-                    phoneNumber = "+1234567890",
-                    callerName = "Test Caller",
-                    callId = "test_call_123"
-                )
-                "ACTIVE" -> CallMetadata.createActiveCall(
-                    phoneNumber = "+1234567890", 
-                    callerName = "Test Caller",
-                    callId = "test_call_123"
-                )
-                "IDLE" -> CallMetadata.createIdleState()
-                else -> CallMetadata.createIdleState()
+            // Only update if we are currently in a call state (prevent random notification noise)
+            val currentState = instance.currentCallState
+            if (currentState != null && currentState.state != CallMetadata.CallState.IDLE) {
+                // Only update if the new name is better than the current one
+                val currentName = currentState.callerName
+                if (shouldUpdateCallerName(currentName, name)) {
+                    Log.d(TAG, "Injecting Friendly Name from Notification: '$name' (replacing '$currentName')")
+                    
+                    val updatedMetadata = currentState.copy(
+                        callerName = name
+                    )
+                    instance.updateCallState(updatedMetadata)
+                } else {
+                    Log.v(TAG, "Keeping existing caller name '$currentName' instead of '$name'")
+                }
+            } else {
+                Log.v(TAG, "Ignoring notification caller name '$name' - no active call")
+            }
+        }
+        
+        /**
+         * Determine if we should replace the current caller name with a new one
+         */
+        private fun shouldUpdateCallerName(current: String?, new: String): Boolean {
+            // If we have no current name, accept any valid new name
+            if (current.isNullOrEmpty() || current == "Unknown Number" || current == "Private Number") {
+                return true
             }
             
-            instance.updateCallState(testMetadata)
+            // Replace default/placeholder names with proper caller names
+            val defaultNames = listOf(
+                "Incoming Call", "Unknown Number", "Private Number", "Blocked", 
+                "Call in progress", "Ongoing call"
+            )
+            
+            if (defaultNames.any { current.equals(it, ignoreCase = true) }) {
+                Log.d(TAG, "Upgrading default name '$current' to caller name '$new'")
+                return true
+            }
+            
+            // Don't replace a good name with system messages
+            val systemNames = listOf(
+                "Unknown Number", "Private Number", "Blocked", "Spam protection disabled",
+                "Allow Truecaller", "Premium", "Subscription"
+            )
+            
+            if (systemNames.any { new.contains(it, ignoreCase = true) }) {
+                Log.d(TAG, "Rejecting system/promotional name: '$new'")
+                return false
+            }
+            
+            // Don't replace a proper name with a phone number
+            val currentIsPhoneNumber = current.replace(Regex("[\u202A-\u202E\u2066-\u2069]"), "").matches(Regex("^[+\\d\\s\\-\\(\\)]+$"))
+            val newIsPhoneNumber = new.replace(Regex("[\u202A-\u202E\u2066-\u2069]"), "").matches(Regex("^[+\\d\\s\\-\\(\\)]+$"))
+            
+            if (!currentIsPhoneNumber && current.any { it.isLetter() } && newIsPhoneNumber) {
+                Log.d(TAG, "Keeping name '$current' instead of number '$new'")
+                return false
+            }
+            
+            // Replace phone number with proper name (prioritize contact names)
+            if (currentIsPhoneNumber && !newIsPhoneNumber && new.any { it.isLetter() }) {
+                Log.d(TAG, "Upgrading number '$current' to name '$new'")
+                return true
+            }
+            
+            // For other cases, keep the first valid name (don't keep changing)
+            Log.d(TAG, "Keeping stable caller name '$current'")
+            return false
+        }
+        
+        /**
+         * Update call state from PhoneStateReceiver (bridge method)
+         */
+        fun updateCallStateFromReceiver(state: String, phoneNumber: String?) {
+            val instance = instance ?: return
+            
+            Log.d(TAG, "Received call state from PhoneStateReceiver: $state, number: $phoneNumber")
+            
+            val callState = when (state) {
+                "IDLE" -> CallMetadata.CallState.IDLE
+                "RINGING" -> CallMetadata.CallState.INCOMING
+                "OFFHOOK" -> CallMetadata.CallState.ACTIVE
+                else -> CallMetadata.CallState.IDLE
+            }
+            
+            val metadata = if (callState == CallMetadata.CallState.IDLE) {
+                // When call ends, determine termination reason based on previous state
+                val currentCall = instance.currentCallState
+                val terminationReason = when (currentCall?.state) {
+                    CallMetadata.CallState.INCOMING -> CallMetadata.TerminationReason.NO_ANSWER // Missed call
+                    CallMetadata.CallState.ACTIVE -> CallMetadata.TerminationReason.LOCAL_PARTY // Normal end during call
+                    else -> CallMetadata.TerminationReason.UNKNOWN // Default fallback
+                }
+                
+                // Preserve the caller name from the current call state
+                val preservedCallerName = currentCall?.callerName
+                val preservedPhoneNumber = currentCall?.phoneNumber ?: phoneNumber
+                
+                Log.d(TAG, "Call terminated with reason: ${terminationReason.name}")
+                Log.d(TAG, "Current call state before termination: ${currentCall?.toString()}")
+                Log.d(TAG, "Preserving caller info: name='$preservedCallerName', number='$preservedPhoneNumber'")
+                
+                CallMetadata.createTerminatedCall(
+                    callerName = preservedCallerName,
+                    phoneNumber = preservedPhoneNumber,
+                    terminationReason = terminationReason
+                )
+            } else {
+                // Preserve existing caller information if available
+                val currentCall = instance.currentCallState
+                if (currentCall != null && (currentCall.callerName != null || currentCall.phoneNumber != null)) {
+                    // Update only the state, preserve existing caller info
+                    Log.d(TAG, "Preserving existing caller info: ${currentCall.callerName ?: currentCall.phoneNumber}")
+                    Log.d(TAG, "State transition: ${currentCall.state.name} → ${callState.name}")
+                    currentCall.copy(state = callState)
+                } else {
+                    // Create new call metadata
+                    Log.d(TAG, "Creating new call metadata for state: ${callState.name}")
+                    CallMetadata.createIncomingCall(
+                        phoneNumber = phoneNumber ?: "Unknown Number",
+                        callerName = null // Will be filled by notification listener
+                    )
+                }
+            }
+            
+            instance.updateCallState(metadata)
         }
     }
     
@@ -184,9 +297,6 @@ class CallListenerService : Service() {
         
         startCallMonitoring()
         
-        // Also listen to PhoneStateReceiver events as backup
-        setupPhoneStateReceiverListener()
-        
         // Create notification for foreground service
         createNotificationChannel()
     }
@@ -201,10 +311,6 @@ class CallListenerService : Service() {
         Log.d(TAG, "CallListenerService destroyed")
         
         stopCallMonitoring()
-        
-        // Remove PhoneStateReceiver listener
-        PhoneStateReceiver.removePhoneStateListener()
-        
         instance = null
     }
     
@@ -302,9 +408,10 @@ class CallListenerService : Service() {
             }
             TelephonyManager.CALL_STATE_RINGING -> {
                 Log.d(TAG, "Incoming call ringing")
+                // Create initial call metadata - caller name will be updated by notification listener
                 CallMetadata.createIncomingCall(
                     phoneNumber = phoneNumber ?: lastPhoneNumber,
-                    callerName = getContactName(phoneNumber ?: lastPhoneNumber),
+                    callerName = "Incoming Call", // Temporary - will be updated by notification
                     callId = generateCallId()
                 )
             }
@@ -314,10 +421,10 @@ class CallListenerService : Service() {
                 val isIncoming = currentCallState?.state == CallMetadata.CallState.INCOMING
                 
                 if (isIncoming) {
-                    // Incoming call was answered
+                    // Incoming call was answered - preserve existing caller name from notification
                     CallMetadata.createActiveCall(
                         phoneNumber = currentCallState?.phoneNumber ?: phoneNumber ?: lastPhoneNumber,
-                        callerName = currentCallState?.callerName ?: getContactName(phoneNumber ?: lastPhoneNumber),
+                        callerName = currentCallState?.callerName ?: "Active Call",
                         callId = currentCallState?.callId ?: generateCallId(),
                         isIncoming = true
                     )
@@ -325,7 +432,7 @@ class CallListenerService : Service() {
                     // Outgoing call
                     CallMetadata.createActiveCall(
                         phoneNumber = phoneNumber ?: lastPhoneNumber,
-                        callerName = getContactName(phoneNumber ?: lastPhoneNumber),
+                        callerName = "Outgoing Call",
                         callId = generateCallId(),
                         isIncoming = false
                     )
@@ -343,92 +450,28 @@ class CallListenerService : Service() {
     private fun updateCallState(metadata: CallMetadata) {
         currentCallState = metadata
         
-        Log.d(TAG, "*** CALL STATE UPDATED *** ")
-        Log.d(TAG, "State: ${metadata.state.name}")
-        Log.d(TAG, "Caller: ${metadata.getDisplayName()}")
-        Log.d(TAG, "Phone: ${metadata.phoneNumber ?: "Unknown"}")
-        Log.d(TAG, "Is Incoming: ${metadata.isIncoming}")
+        Log.d(TAG, "Updated call state to: ${metadata.state.name} for ${metadata.getDisplayName()}")
+        Log.d(TAG, "Call details: state=${metadata.state.name}, caller='${metadata.callerName}', number='${metadata.phoneNumber}'")
         
-        // Notify BLE clients immediately
+        // Notify BLE clients
         bleManager?.let { manager ->
             try {
-                Log.d(TAG, "*** SENDING CALL NOTIFICATION TO BLE ***")
+                Log.d(TAG, "Notifying BLE clients of call state change")
                 manager.updateCallMetadata(metadata)
-                Log.d(TAG, "Call notification sent successfully")
             } catch (e: Exception) {
-                Log.e(TAG, "Error sending call notification to BLE", e)
+                Log.e(TAG, "Error notifying BLE clients", e)
             }
-        } ?: Log.e(TAG, "BLE Manager is null - cannot send call notifications!")
+        }
     }
     
     private fun getContactName(phoneNumber: String?): String? {
-        // TODO: Implement contact lookup from phone's contact database
-        // For now, return the phone number or a default name
+        // Note: We primarily rely on CallNotificationListener for caller names now
+        // This is just a fallback for cases where notification doesn't provide a name
         return phoneNumber?.let { "Contact: $it" }
     }
     
     private fun generateCallId(): String {
         return "call_${System.currentTimeMillis()}"
-    }
-    
-    /**
-     * Setup listener for PhoneStateReceiver events (backup call monitoring)
-     */
-    private fun setupPhoneStateReceiverListener() {
-        Log.d(TAG, "Setting up PhoneStateReceiver bridge for BLE notifications")
-        
-        PhoneStateReceiver.setPhoneStateListener { phoneCallInfo ->
-            Log.d(TAG, "*** RECEIVED CALL FROM PHONESTATECEIVER ***")
-            Log.d(TAG, "State: ${phoneCallInfo.state}")
-            Log.d(TAG, "Number: ${phoneCallInfo.phoneNumber}")
-            
-            // Convert PhoneCallInfo to CallMetadata
-            val callMetadata = convertPhoneCallInfoToCallMetadata(phoneCallInfo)
-            
-            // Update our state and send to BLE
-            updateCallState(callMetadata)
-        }
-    }
-    
-    /**
-     * Convert PhoneCallInfo to CallMetadata for BLE transmission
-     */
-    private fun convertPhoneCallInfoToCallMetadata(phoneCallInfo: PhoneCallInfo): CallMetadata {
-        val callState = when (phoneCallInfo.state) {
-            PhoneCallState.IDLE -> CallMetadata.CallState.IDLE
-            PhoneCallState.RINGING -> CallMetadata.CallState.INCOMING
-            PhoneCallState.OFFHOOK -> {
-                // Determine if this was an incoming call being answered or outgoing
-                val wasIncoming = currentCallState?.state == CallMetadata.CallState.INCOMING
-                if (wasIncoming) {
-                    CallMetadata.CallState.ACTIVE
-                } else {
-                    CallMetadata.CallState.ACTIVE // Could also be DIALING initially
-                }
-            }
-        }
-        
-        val callerName = if (phoneCallInfo.phoneNumber != null) {
-            getContactName(phoneCallInfo.phoneNumber) ?: phoneCallInfo.phoneNumber
-        } else {
-            "Unknown Caller"
-        }
-        
-        val terminationReason = if (callState == CallMetadata.CallState.IDLE && currentCallState?.isCallActive() == true) {
-            CallMetadata.TerminationReason.UNKNOWN
-        } else {
-            null
-        }
-        
-        return CallMetadata(
-            phoneNumber = phoneCallInfo.phoneNumber,
-            callerName = callerName,
-            state = callState,
-            callId = currentCallState?.callId ?: generateCallId(),
-            timestamp = phoneCallInfo.timestamp,
-            terminationReason = terminationReason,
-            isIncoming = callState == CallMetadata.CallState.INCOMING
-        )
     }
     
     private fun createNotificationChannel() {

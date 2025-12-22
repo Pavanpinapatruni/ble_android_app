@@ -426,7 +426,34 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
                 Log.d(TAG, "Sent GATT_SUCCESS response")
             }
 
-            Log.d(TAG, "Client ${device.address} subscribed to notifications")
+            // Track subscription status
+            val isEnabling = value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            val isDisabling = value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)
+            
+            if (isEnabling || isDisabling) {
+                val characteristicUuid = descriptor.characteristic?.uuid
+                if (characteristicUuid != null) {
+                    // Initialize device subscription tracking if needed
+                    if (!deviceSubscriptions.containsKey(device)) {
+                        deviceSubscriptions[device] = mutableSetOf()
+                    }
+                    
+                    val charName = getCharacteristicName(characteristicUuid)
+                    
+                    if (isEnabling) {
+                        deviceSubscriptions[device]?.add(characteristicUuid)
+                        Log.d(TAG, "Client ${device.address} ENABLED notifications for $charName")
+                    } else if (isDisabling) {
+                        deviceSubscriptions[device]?.remove(characteristicUuid)
+                        Log.d(TAG, "Client ${device.address} DISABLED notifications for $charName")
+                    }
+                    
+                    val subscribedCount = deviceSubscriptions[device]?.size ?: 0
+                    Log.d(TAG, "Device ${device.address} now has $subscribedCount active subscriptions")
+                }
+            } else {
+                Log.d(TAG, "Client ${device.address} wrote descriptor with unknown value: ${value.contentToString()}")
+            }
         }
 
         override fun onCharacteristicReadRequest(
@@ -1445,5 +1472,30 @@ class BleManager(private val context: Context) : MediaManager.BleManagerInterfac
         
         // Start monitoring after initial connection settling
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(monitor, 3000)
+    }
+    
+    /**
+     * Get human-readable characteristic name for logging
+     */
+    private fun getCharacteristicName(uuid: UUID): String {
+        return when (uuid) {
+            // Media Control Service (MCS) characteristics
+            MediaManager.MP_NAME_UUID -> "MP_NAME"
+            MediaManager.TRACK_CHANGED_UUID -> "TRACK_CHANGED"
+            MediaManager.TITLE_UUID -> "TITLE"
+            MediaManager.DURATION_UUID -> "DURATION"
+            MediaManager.POSITION_UUID -> "POSITION"
+            MediaManager.STATE_UUID -> "STATE"
+            MediaManager.MCP_UUID -> "MCP"
+            MediaManager.MCP_OPCODE_SUPPORTED_UUID -> "MCP_OPCODE_SUPPORTED"
+            
+            // Telephone Bearer Service (TBS) characteristics
+            CallManager.CALL_STATE_UUID -> "TBS_CALL_STATE"
+            CallManager.CALL_CONTROL_POINT_UUID -> "TBS_CALL_CONTROL"
+            CallManager.CALL_FRIENDLY_NAME_UUID -> "TBS_FRIENDLY_NAME"
+            CallManager.TERMINATION_REASON_UUID -> "TBS_TERMINATION_REASON"
+            
+            else -> uuid.toString().substring(0, 8) + "..."
+        }
     }
 }

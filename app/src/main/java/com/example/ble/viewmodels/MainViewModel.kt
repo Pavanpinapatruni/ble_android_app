@@ -8,7 +8,6 @@ import com.example.ble.ble.BleManager
 import com.example.ble.models.BleDevice
 import com.example.ble.models.MediaMetadata
 import com.example.ble.models.PhoneCallInfo
-import com.example.ble.models.CallMetadata
 import com.example.ble.receivers.PhoneStateReceiver
 import com.example.ble.services.MediaListenerService
 import com.example.ble.services.CallListenerService
@@ -43,10 +42,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MediaListenerService.setBleManager(bleManager)
         setupMediaListener()
         setupPhoneStateListener()
-        
-        // Start call monitoring service
-        CallListenerService.startService(application, bleManager)
-        Log.d("MainViewModel", "CallListenerService started")
+        startCallListenerService()
     }
 
     private fun setupMediaListener() {
@@ -66,6 +62,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d("MainViewModel", "Call state changed: ${callInfo.state}")
             }
         }
+    }
+
+    private fun startCallListenerService() {
+        Log.d("MainViewModel", "Starting CallListenerService for TBS monitoring...")
+        CallListenerService.startService(getApplication(), bleManager)
     }
 
     // BLE functions
@@ -114,5 +115,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         bleManager.cleanup()
         MediaListenerService.removeMediaUpdateListener()
         PhoneStateReceiver.removePhoneStateListener()
+        CallListenerService.stopService(getApplication())
     }
 }
