@@ -228,60 +228,23 @@ class CallListenerService : Service() {
         
         /**
          * Update call state from PhoneStateReceiver (bridge method)
+         * This method now properly delegates to handleCallStateChange for correct state logic
          */
         fun updateCallStateFromReceiver(state: String, phoneNumber: String?) {
             val instance = instance ?: return
             
             Log.d(TAG, "Received call state from PhoneStateReceiver: $state, number: $phoneNumber")
             
-            val callState = when (state) {
-                "IDLE" -> CallMetadata.CallState.IDLE
-                "RINGING" -> CallMetadata.CallState.INCOMING
-                "OFFHOOK" -> CallMetadata.CallState.ACTIVE
-                else -> CallMetadata.CallState.IDLE
+            // Convert string state to TelephonyManager constants and delegate to proper handler
+            val telephonyState = when (state) {
+                "IDLE" -> TelephonyManager.CALL_STATE_IDLE
+                "RINGING" -> TelephonyManager.CALL_STATE_RINGING
+                "OFFHOOK" -> TelephonyManager.CALL_STATE_OFFHOOK
+                else -> TelephonyManager.CALL_STATE_IDLE
             }
             
-            val metadata = if (callState == CallMetadata.CallState.IDLE) {
-                // When call ends, determine termination reason based on previous state
-                val currentCall = instance.currentCallState
-                val terminationReason = when (currentCall?.state) {
-                    CallMetadata.CallState.INCOMING -> CallMetadata.TerminationReason.NO_ANSWER // Missed call
-                    CallMetadata.CallState.ACTIVE -> CallMetadata.TerminationReason.LOCAL_PARTY // Normal end during call
-                    else -> CallMetadata.TerminationReason.UNKNOWN // Default fallback
-                }
-                
-                // Preserve the caller name from the current call state
-                val preservedCallerName = currentCall?.callerName
-                val preservedPhoneNumber = currentCall?.phoneNumber ?: phoneNumber
-                
-                Log.d(TAG, "Call terminated with reason: ${terminationReason.name}")
-                Log.d(TAG, "Current call state before termination: ${currentCall?.toString()}")
-                Log.d(TAG, "Preserving caller info: name='$preservedCallerName', number='$preservedPhoneNumber'")
-                
-                CallMetadata.createTerminatedCall(
-                    callerName = preservedCallerName,
-                    phoneNumber = preservedPhoneNumber,
-                    terminationReason = terminationReason
-                )
-            } else {
-                // Preserve existing caller information if available
-                val currentCall = instance.currentCallState
-                if (currentCall != null && (currentCall.callerName != null || currentCall.phoneNumber != null)) {
-                    // Update only the state, preserve existing caller info
-                    Log.d(TAG, "Preserving existing caller info: ${currentCall.callerName ?: currentCall.phoneNumber}")
-                    Log.d(TAG, "State transition: ${currentCall.state.name} → ${callState.name}")
-                    currentCall.copy(state = callState)
-                } else {
-                    // Create new call metadata
-                    Log.d(TAG, "Creating new call metadata for state: ${callState.name}")
-                    CallMetadata.createIncomingCall(
-                        phoneNumber = phoneNumber ?: "Unknown Number",
-                        callerName = null // Will be filled by notification listener
-                    )
-                }
-            }
-            
-            instance.updateCallState(metadata)
+            // Use the proper call state handling with all our OFFHOOK logic
+            instance.handleCallStateChange(telephonyState, phoneNumber)
         }
     }
     
@@ -417,25 +380,110 @@ class CallListenerService : Service() {
             }
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 Log.d(TAG, "Call off hook (active or dialing)")
-                // Determine if this is an incoming call being answered or outgoing call
-                val isIncoming = currentCallState?.state == CallMetadata.CallState.INCOMING
+                Log.d(TAG, "Current call state: ${currentCallState?.state?.name ?: "null"}")
+                Log.d(TAG, "Current caller name: ${currentCallState?.callerName ?: "null"}")
+                Log.d(TAG, "Phone number from event: $phoneNumber")
                 
-                if (isIncoming) {
-                    // Incoming call was answered - preserve existing caller name from notification
-                    CallMetadata.createActiveCall(
-                        phoneNumber = currentCallState?.phoneNumber ?: phoneNumber ?: lastPhoneNumber,
-                        callerName = currentCallState?.callerName ?: "Active Call",
-                        callId = currentCallState?.callId ?: generateCallId(),
-                        isIncoming = true
-                    )
-                } else {
-                    // Outgoing call
-                    CallMetadata.createActiveCall(
-                        phoneNumber = phoneNumber ?: lastPhoneNumber,
-                        callerName = "Outgoing Call",
-                        callId = generateCallId(),
-                        isIncoming = false
-                    )
+                // Determine if this is an incoming call being answered or outgoing call
+                val isIncomingBeingAnswered = currentCallState?.state == CallMetadata.CallState.INCOMING
+                val isOutgoingDialing = currentCallState?.state == CallMetadata.CallState.DIALING
+                val isAlreadyActive = currentCallState?.state == CallMetadata.CallState.ACTIVE
+                val isPreviousCallIdle = currentCallState?.state == CallMetadata.CallState.IDLE
+                
+                when {
+                    isIncomingBeingAnswered -> {
+                        // Incoming call was answered - preserve existing caller name from notification
+                        Log.d(TAG, "Incoming call answered - transitioning to ACTIVE")
+                        CallMetadata.createActiveCall(
+                            phoneNumber = currentCallState?.phoneNumber ?: phoneNumber ?: lastPhoneNumber,
+                            callerName = currentCallState?.callerName ?: "Active Call",
+                            callId = currentCallState?.callId ?: generateCallId(),
+                            isIncoming = true
+                        )
+                    }
+                    isOutgoingDialing -> {
+                        // Check if this is a rapid duplicate OFFHOOK or genuine call answer
+                        val timeSinceLastUpdate = System.currentTimeMillis() - (currentCallState?.timestamp ?: 0)
+                        if (timeSinceLastUpdate > 500) { // More than 500ms - likely call answered
+                            Log.d(TAG, "Second OFFHOOK after ${timeSinceLastUpdate}ms: Outgoing call answered - transitioning DIALING to ACTIVE")
+                            CallMetadata.createActiveCall(
+                                phoneNumber = currentCallState?.phoneNumber ?: phoneNumber ?: lastPhoneNumber,
+                                callerName = currentCallState?.callerName ?: "Outgoing Call",
+                                callId = currentCallState?.callId ?: generateCallId(),
+                                isIncoming = false
+                            )
+                        } else {
+                            // Too rapid - likely duplicate OFFHOOK during call setup
+                            Log.d(TAG, "Ignoring rapid OFFHOOK during DIALING (${timeSinceLastUpdate}ms gap) - keeping DIALING state")
+                            currentCallState!!
+                        }
+                    }
+                    isPreviousCallIdle -> {
+                        // Starting a new outgoing call after a previous call ended - start with DIALING state
+                        Log.d(TAG, "New outgoing call after IDLE - setting to DIALING state")
+                        val metadata = CallMetadata.createOutgoingCall(
+                            phoneNumber = phoneNumber ?: lastPhoneNumber ?: "Unknown Number",
+                            callerName = "Outgoing Call",
+                            callId = generateCallId()
+                        )
+                        
+                        // Schedule transition to ACTIVE state for outgoing calls (backup mechanism)
+                        scheduleOutgoingCallActivation(metadata)
+                        
+                        metadata
+                    }
+                    isAlreadyActive -> {
+                        // Duplicate OFFHOOK event during active call - check if this is actually a new call
+                        val timeSinceLastUpdate = System.currentTimeMillis() - (currentCallState?.timestamp ?: 0)
+                        if (timeSinceLastUpdate > 1000) { // More than 1 second - likely new call
+                            Log.d(TAG, "New outgoing call detected during ACTIVE (time gap: ${timeSinceLastUpdate}ms) - resetting to DIALING")
+                            val metadata = CallMetadata.createOutgoingCall(
+                                phoneNumber = phoneNumber ?: lastPhoneNumber ?: "Unknown Number",
+                                callerName = "Outgoing Call",
+                                callId = generateCallId()
+                            )
+                            
+                            scheduleOutgoingCallActivation(metadata)
+                            metadata
+                        } else {
+                            // Real duplicate - ignore
+                            Log.d(TAG, "Duplicate OFFHOOK detected during ACTIVE (time gap: ${timeSinceLastUpdate}ms) - ignoring")
+                            currentCallState!! // Safe to use !! here since we checked it's not null above
+                        }
+                    }
+                    currentCallState?.state == CallMetadata.CallState.DIALING -> {
+                        // Second OFFHOOK during DIALING - check if duplicate or new call
+                        val timeSinceLastUpdate = System.currentTimeMillis() - (currentCallState?.timestamp ?: 0)
+                        if (timeSinceLastUpdate > 1000) { // More than 1 second - likely new call
+                            Log.d(TAG, "New outgoing call detected during DIALING (time gap: ${timeSinceLastUpdate}ms) - creating new call")
+                            val metadata = CallMetadata.createOutgoingCall(
+                                phoneNumber = phoneNumber ?: lastPhoneNumber ?: "Unknown Number",
+                                callerName = "Outgoing Call",
+                                callId = generateCallId()
+                            )
+                            
+                            scheduleOutgoingCallActivation(metadata)
+                            metadata
+                        } else {
+                            // Real duplicate during DIALING - ignore
+                            Log.d(TAG, "Duplicate OFFHOOK detected during DIALING (time gap: ${timeSinceLastUpdate}ms) - ignoring")
+                            currentCallState!!
+                        }
+                    }
+                    else -> {
+                        // First OFFHOOK for outgoing call - start with DIALING state
+                        Log.d(TAG, "First OFFHOOK: Outgoing call starting - setting to DIALING state")
+                        val metadata = CallMetadata.createOutgoingCall(
+                            phoneNumber = phoneNumber ?: lastPhoneNumber ?: "Unknown Number",
+                            callerName = "Outgoing Call",
+                            callId = generateCallId()
+                        )
+                        
+                        // Schedule transition to ACTIVE state for outgoing calls (backup mechanism)
+                        scheduleOutgoingCallActivation(metadata)
+                        
+                        metadata
+                    }
                 }
             }
             else -> {
@@ -495,5 +543,41 @@ class CallListenerService : Service() {
             
             startForeground(1, notification)
         }
+    }
+    
+    /**
+     * Schedule transition from DIALING to ACTIVE for outgoing calls
+     */
+    private fun scheduleOutgoingCallActivation(dialingMetadata: CallMetadata) {
+        Log.d(TAG, "Scheduling outgoing call activation in 3 seconds")
+        Log.d(TAG, "Dialing metadata: callId=${dialingMetadata.callId}, state=${dialingMetadata.state.name}")
+        
+        // Use a handler to schedule the transition
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            Log.d(TAG, "*** SCHEDULED TRANSITION CHECK ***")
+            Log.d(TAG, "Current call state: ${currentCallState?.state?.name ?: "null"}")
+            Log.d(TAG, "Current call ID: ${currentCallState?.callId}")
+            Log.d(TAG, "Expected call ID: ${dialingMetadata.callId}")
+            Log.d(TAG, "Call IDs match: ${currentCallState?.callId == dialingMetadata.callId}")
+            Log.d(TAG, "Still in DIALING: ${currentCallState?.state == CallMetadata.CallState.DIALING}")
+            
+            // Only transition if we're still in the same call and still in DIALING state
+            if (currentCallState?.callId == dialingMetadata.callId && 
+                currentCallState?.state == CallMetadata.CallState.DIALING) {
+                
+                Log.d(TAG, "✓ Transitioning outgoing call from DIALING to ACTIVE")
+                val activeMetadata = CallMetadata.createActiveCall(
+                    phoneNumber = dialingMetadata.phoneNumber,
+                    callerName = dialingMetadata.callerName,
+                    callId = dialingMetadata.callId,
+                    isIncoming = false
+                )
+                Log.d(TAG, "Active metadata created: state=${activeMetadata.state.name}, caller='${activeMetadata.callerName}'")
+                updateCallState(activeMetadata)
+            } else {
+                Log.w(TAG, "✗ Skipping scheduled outgoing call activation (call state changed)")
+                Log.d(TAG, "Reason: callId match=${currentCallState?.callId == dialingMetadata.callId}, still dialing=${currentCallState?.state == CallMetadata.CallState.DIALING}")
+            }
+        }, 5000) // 5 seconds delay as backup (in case no second OFFHOOK event)
     }
 }

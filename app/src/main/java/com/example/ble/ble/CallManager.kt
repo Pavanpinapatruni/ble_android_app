@@ -180,7 +180,26 @@ class CallManager(private val bleManager: MediaManager.BleManagerInterface) {
         )
         
         Log.d(TAG, "Sending CALL_STATE: ${metadata.state.name} (index: 0x${"%02x".format(callIndex)}, state: 0x${"%02x".format(callStateValue)}, flags: 0x${"%02x".format(callFlags)})")
-        notifyCharacteristicBytes(CALL_STATE_UUID, callStateBytes)
+        
+        // Force send call state for new calls (different call IDs) even if state appears same
+        val isNewCall = currentCallMetadata?.callId != metadata.callId
+        if (isNewCall) {
+            Log.d(TAG, "New call detected (ID: ${metadata.callId} vs ${currentCallMetadata?.callId}) - forcing call state notification")
+            val gattServer = bleManager.getGattServer()
+            val service = gattServer?.getService(TBS_SERVICE_UUID)
+            val characteristic = service?.getCharacteristic(CALL_STATE_UUID)
+            
+            if (characteristic != null) {
+                characteristic.value = callStateBytes
+                bleManager.getConnectedDevices().forEach { device ->
+                    val ok = bleManager.notifyCharacteristicChanged(device, characteristic)
+                    Log.d(TAG, "Force notify CALL_STATE to ${device.address} (new call) → $ok")
+                }
+            }
+        } else {
+            // Normal call state notification
+            notifyCharacteristicBytes(CALL_STATE_UUID, callStateBytes)
+        }
         
         // Send caller name for active calls
         metadata.callerName?.let { name ->
